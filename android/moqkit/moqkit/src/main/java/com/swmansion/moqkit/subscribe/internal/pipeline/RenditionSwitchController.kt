@@ -18,19 +18,37 @@ internal sealed interface SwitchDecision {
 internal class RenditionSwitchController(
     private val policy: SwitchPolicy,
 ) {
+    private var reservePressureStartedNs: Long? = null
+
     var state: SwitchState = SwitchState.Steady
         private set
 
     fun begin(targetTrack: String) {
         require(targetTrack.isNotBlank()) { "target track must not be blank" }
+        reservePressureStartedNs = null
         state = SwitchState.Preparing(targetTrack)
     }
 
     fun canPromoteUpgrade(elapsedNs: Long, bufferedAheadUs: Long, requiredAheadUs: Long): Boolean =
         elapsedNs >= 1_500_000_000L && bufferedAheadUs >= requiredAheadUs
 
-    fun shouldAbandonUpgrade(activeAheadUs: Long, minimumActiveLeadUs: Long): Boolean =
-        minimumActiveLeadUs > 0 && activeAheadUs < minimumActiveLeadUs
+    fun shouldAbandonUpgrade(
+        activeAheadUs: Long,
+        minimumActiveLeadUs: Long,
+        nowNs: Long = System.nanoTime(),
+    ): Boolean {
+        if (minimumActiveLeadUs <= 0 || activeAheadUs >= minimumActiveLeadUs) {
+            reservePressureStartedNs = null
+            return false
+        }
+        // Grouped delivery briefly crosses the normal watermark. Give it the
+        // same bounded replenishment grace as iOS, but cancel immediately when
+        // the playing picture has less than 200 ms left (or a smaller target).
+        if (activeAheadUs < minOf(minimumActiveLeadUs, 200_000L)) return true
+        val started = reservePressureStartedNs ?: nowNs
+        reservePressureStartedNs = started
+        return nowNs >= started && nowNs - started >= 200_000_000L
+    }
 
     fun shouldSuppressOverlap(isNewTrack: Boolean, ptsUs: Long, oldLastFedUs: Long): Boolean =
         isNewTrack && ptsUs <= oldLastFedUs
@@ -80,6 +98,7 @@ internal class RenditionSwitchController(
         positiveDifference(lastFedPtsUs, framePtsUs) > policy.cutInWindowUs
 
     fun complete() {
+        reservePressureStartedNs = null
         state = SwitchState.Steady
     }
 
