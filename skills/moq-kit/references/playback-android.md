@@ -118,3 +118,12 @@ Retiring a track closes any active stall interval owned by that track. Audio
 and video stalls remain separate, and a late event from retired video cannot
 close or restart the replacement track's interval. Stopping the player retires
 its active intervals once instead of leaving stale recovery state behind.
+
+### Cancelling a trial
+
+Aborting an ordinary pending rendition closes its network subscription before
+waiting for UI/actor or coroutine cleanup. Cancellation targets the captured
+trial, so a late callback cannot close a newer owner. An explicitly retained
+fallback keeps its demand until teardown. Coroutine cancellation before startup
+also closes the subscription. These are ownership guarantees, not wire delivery
+or physical continuity measurements.

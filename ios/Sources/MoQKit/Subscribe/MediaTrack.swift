@@ -238,6 +238,12 @@ public final class MediaTrack: @unchecked Sendable {
         }
     }
 
+    /// Stop network demand from the renderer queue without touching the task
+    /// owned by the pipeline actor. The underlying stream closes under its lock.
+    func cancelUpstream() {
+        media.close()
+    }
+
     /// Cancels the track subscription and completes both ``frames`` and ``state`` streams.
     ///
     /// Safe to call multiple times.

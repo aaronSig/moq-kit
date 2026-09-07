@@ -40,6 +40,18 @@ import java.time.Duration
 private const val TAG = "PlaybackPipeline"
 private const val TIMELINE_DOMAIN_TOLERANCE_US = 0L
 
+/** Owns network demand independently of coroutine dispatch or completion. */
+internal class VideoIngestHandle(val job: Job, private val subscription: AutoCloseable) {
+    init {
+        // A coroutine cancelled before its body starts never reaches its finally.
+        job.invokeOnCompletion { subscription.close() }
+    }
+    val isActive: Boolean get() = job.isActive
+    fun cancel() {
+        try { subscription.close() } finally { job.cancel() }
+    }
+}
+
 internal enum class PlaybackPipelineSwitchOutcome {
     HANDLED,
     RESTART_REQUIRED,
@@ -90,9 +102,9 @@ internal class PlaybackPipeline(
     private var audioRenderer: AudioRenderer? = null
     private var videoRenderer: VideoRenderer? = null
     private var audioIngestJob: Job? = null
-    private val videoIngestJobs = RenditionSwitchResources<Job>(close = Job::cancel)
+    private val videoIngestJobs = RenditionSwitchResources<VideoIngestHandle>(close = VideoIngestHandle::cancel)
     private var warmFallbackTrack: VideoRendererTrack? = null
-    private var warmFallbackJob: Job? = null
+    private var warmFallbackJob: VideoIngestHandle? = null
     private var coordinatorJob: Job? = null
 
     val currentTimeUs: Long
@@ -438,13 +450,13 @@ internal class PlaybackPipeline(
         track: VideoRendererTrack,
         trackEpoch: Long,
         timeline: TrackTimeline,
-    ): Job {
+    ): VideoIngestHandle {
         Log.d(TAG, "Subscribing to video track '${videoInfo.name}'")
         val videoMediaTrack = broadcastOwner.subscribeMedia(
             MediaTrackRequest(track = videoInfo, targetBuffering = targetBuffering),
         )
 
-        return scope.launch {
+        val job = scope.launch {
             var firstFrame = true
             fun submit(frame: MediaFrame, eventContext: PipelineContext) {
                 val accepted = when (val result = track.insert(frame.payload, frame.timestampUs, frame.keyframe)) {
@@ -562,11 +574,12 @@ internal class PlaybackPipeline(
                 videoMediaTrack.close()
             }
         }
+        return VideoIngestHandle(job, videoMediaTrack)
     }
 
     private fun restartCoordinator() {
         coordinatorJob?.cancel()
-        val jobs = listOfNotNull(audioIngestJob, videoIngestJobs.active)
+        val jobs = listOfNotNull(audioIngestJob, videoIngestJobs.active?.job)
         if (jobs.isEmpty()) {
             coordinatorJob = null
             return

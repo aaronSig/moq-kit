@@ -135,3 +135,12 @@ they do not establish a maximum downshift/recovery time under arbitrary networks
 with `warmFallbackBufferedAhead`, `warmFallbackIsReceiving` and
 `warmFallbackReuseCount` observations. It defaults to nil and adds network demand
 when enabled. Leave it disabled in ordinary playback and bandwidth comparisons.
+
+### Cancelling a trial
+
+Aborting an ordinary pending rendition closes its network subscription before
+waiting for UI/actor or coroutine cleanup. Cancellation targets the captured
+trial, so a late callback cannot close a newer owner. An explicitly retained
+fallback keeps its demand until teardown. Coroutine cancellation before startup
+also closes the subscription. These are ownership guarantees, not wire delivery
+or physical continuity measurements.

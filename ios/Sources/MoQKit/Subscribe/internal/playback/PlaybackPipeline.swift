@@ -393,6 +393,9 @@ final class PlaybackPipeline {
                 }
             },
             onAborted: { [weak self] expectedTrialAbort in
+                // Stop this trial's demand before waiting for UI/actor cleanup.
+                // Capture its subscription, never whichever track owns the pipeline later.
+                if !newRendererTrack.isRetainedFallback { newSub.cancelUpstream() }
                 Task { @MainActor [weak self] in
                     guard let self, self.pendingVideoCleanup === oldHandle else { return }
                     if newRendererTrack !== self.warmFallbackTrack {
