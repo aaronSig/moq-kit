@@ -144,3 +144,14 @@ trial, so a late callback cannot close a newer owner. An explicitly retained
 fallback keeps its demand until teardown. Coroutine cancellation before startup
 also closes the subscription. These are ownership guarantees, not wire delivery
 or physical continuity measurements.
+
+## Fatal video decoding errors
+
+After AVFoundation exhausts the bounded display-flush recovery budget, the player
+emits one `decode.error` event for the active video track and its playback epoch.
+Repeated callbacks from that failed track do not emit another fatal event. The
+diagnostic `video-renderer-failed` transport-closed event remains available.
+Applications can use the public event for a bounded codec fallback; match the
+current player, active track and epoch before replacing playback. Pending-rendition
+failures, stale events and audio decode errors must not trigger a video codec change.
+The SDK does not automatically choose another codec on the application's behalf.

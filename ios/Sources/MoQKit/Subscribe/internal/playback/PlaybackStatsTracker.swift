@@ -167,11 +167,11 @@ final class PlaybackStatsTracker: MediaFrameObserver, @unchecked Sendable {
         }
     }
 
-    func emitDecodeError(kind: MediaFrameKind, trackName: String, message: String) {
+    func emitDecodeError(kind: MediaFrameKind, trackName: String, message: String, trackEpoch: TrackEpoch = .zero) {
         events.emit(
             .decodeError(
                 PlayerTrackErrorEvent(
-                    track: trackEvent(kind: kind, trackName: trackName),
+                    track: trackEvent(kind: kind, trackName: trackName, trackEpoch: trackEpoch),
                     message: message
                 )
             )
