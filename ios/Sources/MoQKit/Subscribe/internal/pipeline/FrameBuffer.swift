@@ -28,6 +28,7 @@ final class FrameBuffer<Payload> {
     private var frames: [PipelineFrame<Payload>] = []
     private var byteCount: UInt64 = 0
     private var keyframeAccepted: Bool
+    private var retainedKeyframePtsUs: Int64?
 
     private(set) var currentEpoch: UInt64?
 
@@ -93,11 +94,40 @@ final class FrameBuffer<Payload> {
 
     func reset(epoch: UInt64) -> Int {
         let count = frames.count
+        retainedKeyframePtsUs = nil
         frames.removeAll(keepingCapacity: true)
         byteCount = 0
         currentEpoch = epoch
         keyframeAccepted = !policy.requireKeyframeAfterReset
         return count
+    }
+
+    /// Retain an accepted handoff point against routine live-edge pruning only.
+    /// Admission limits and resets can still evict it; the renderer revalidates.
+    func retainKeyframe(_ timestampUs: Int64) -> Bool {
+        guard frames.contains(where: { $0.keyframe && $0.timestampUs == timestampUs }) else { return false }
+        retainedKeyframePtsUs = timestampUs
+        discardBeforeNewestKeyframe(timestampUs)
+        return true
+    }
+
+    func releaseRetainedKeyframe() {
+        retainedKeyframePtsUs = nil
+    }
+
+    func hasRetainedKeyframeCoverage(_ timestampUs: Int64, through playheadUs: Int64) -> Bool {
+        retainedKeyframePtsUs == timestampUs
+            && frames.first?.keyframe == true
+            && frames.first?.timestampUs == timestampUs
+            && (frames.last.map { $0.timestampUs >= playheadUs } ?? false)
+    }
+
+    func discardBeforeNewestKeyframe(_ cutoffUs: Int64) {
+        let effectiveCutoffUs = retainedKeyframePtsUs.map { min(cutoffUs, $0) } ?? cutoffUs
+        guard let index = frames.lastIndex(where: { $0.keyframe && $0.timestampUs <= effectiveCutoffUs }), index > 0 else { return }
+        byteCount -= frames.prefix(index).reduce(0) { $0 + UInt64($1.sizeBytes) }
+        frames.removeFirst(index)
+        keyframeAccepted = true
     }
 
     func peekFront() -> PipelineFrame<Payload>? {
