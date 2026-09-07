@@ -39,24 +39,28 @@ final class MediaFrameStream: @unchecked Sendable {
 struct MediaSubscriptionKey: Hashable, Sendable {
     let name: String
     let container: Moq.Container
+    let startAtLiveEdge: Bool
 
     init(_ request: MediaTrackRequest) {
         self.name = request.name
         self.container = request.container.rawContainer
+        self.startAtLiveEdge = request.startAtLiveEdge
     }
 }
 
 final class MediaSubscriptionRegistry: @unchecked Sendable {
     private let lock = UnfairLock()
     private let broadcast: Moq.BroadcastConsumer
+    private let liveMediaSubscriptionFactory: LiveMediaSubscriptionFactory?
     private var hubs: [MediaSubscriptionKey: MediaFrameHub] = [:]
 
     var activeSubscriptionCount: Int {
         lock.withLock { hubs.count }
     }
 
-    init(broadcast: Moq.BroadcastConsumer) {
+    init(broadcast: Moq.BroadcastConsumer, liveMediaSubscriptionFactory: LiveMediaSubscriptionFactory? = nil) {
         self.broadcast = broadcast
+        self.liveMediaSubscriptionFactory = liveMediaSubscriptionFactory
     }
 
     /// Returns a downstream compressed-frame stream for a media track.
@@ -68,6 +72,9 @@ final class MediaSubscriptionRegistry: @unchecked Sendable {
         _ request: MediaTrackRequest,
         bufferingPolicy: MediaTrackBufferingPolicy = .unbounded
     ) throws -> MediaFrameStream {
+        guard !request.startAtLiveEdge || liveMediaSubscriptionFactory != nil else {
+            throw SessionError.invalidConfiguration("Fresh live media requires a liveMediaSubscriptionFactory")
+        }
         let key = MediaSubscriptionKey(request)
 
         let result: Result<MediaFrameStream, Error> = lock.withLock {
@@ -79,13 +86,18 @@ final class MediaSubscriptionRegistry: @unchecked Sendable {
             }
 
             let created = MediaFrameHub(
-                subscribe: { [broadcast] in
-                    try await broadcast.subscribeMedia(
+                subscribe: { [broadcast, liveMediaSubscriptionFactory] in
+                    let preferences = Moq.Subscription(
+                        priority: request.priority,
+                        latencyMaxMs: request.targetBuffering.millisecondsUInt64Clamped)
+                    if request.startAtLiveEdge, let liveMediaSubscriptionFactory {
+                        return try await liveMediaSubscriptionFactory(
+                            broadcast, request.name, request.container.rawContainer, preferences)
+                    }
+                    return try await broadcast.subscribeMedia(
                         name: request.name,
                         container: request.container.rawContainer,
-                        subscription: Moq.Subscription(
-                            priority: request.priority,
-                            latencyMaxMs: request.targetBuffering.millisecondsUInt64Clamped)
+                        subscription: preferences
                     )
                 }
             ) { [weak self] hub in

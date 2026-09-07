@@ -41,6 +41,13 @@ public enum MediaContainer: Sendable, Equatable, Hashable {
 
 // MARK: - Media Track Request
 
+/// A typed bridge to a native library that can skip locally cached media when
+/// opening a live reader. Supplying it opts catalog video subscriptions into
+/// fresh starts while keeping SDK builds compatible with the published FFI.
+public typealias LiveMediaSubscriptionFactory = @Sendable (
+    Moq.BroadcastConsumer, String, Moq.Container, Moq.Subscription
+) async throws -> Moq.MediaConsumer
+
 /// Parameters needed to subscribe to a MoQ media track.
 ///
 /// Use this when subscribing to media by name from a ``Broadcast`` without relying on catalog
@@ -55,17 +62,22 @@ public struct MediaTrackRequest: Sendable, Equatable {
     public let targetBuffering: Duration
     /// Delivery priority; larger values are scheduled ahead of smaller values.
     public let priority: UInt8
+    /// Requires a configured live subscription factory. Ordinary media requests
+    /// preserve cached delivery; explicit live requests never silently fall back.
+    public let startAtLiveEdge: Bool
 
     public init(
         name: String,
         container: MediaContainer,
         targetBuffering: Duration = .milliseconds(100),
-        priority: UInt8 = 0
+        priority: UInt8 = 0,
+        startAtLiveEdge: Bool = false
     ) {
         self.name = name
         self.container = container
         self.targetBuffering = targetBuffering
         self.priority = priority
+        self.startAtLiveEdge = startAtLiveEdge
     }
 
     init(track: AudioTrackInfo, targetBuffering: Duration) {
@@ -77,12 +89,13 @@ public struct MediaTrackRequest: Sendable, Equatable {
         )
     }
 
-    init(track: VideoTrackInfo, targetBuffering: Duration) {
+    init(track: VideoTrackInfo, targetBuffering: Duration, startAtLiveEdge: Bool = false) {
         self.init(
             name: track.name,
             container: MediaContainer(track.rawConfig.container),
             targetBuffering: targetBuffering,
-            priority: (track.config.coded?.height ?? 720) <= 240 ? 65 : (track.config.coded?.height ?? 720) <= 360 ? 60 : (track.config.coded?.height ?? 720) <= 540 ? 55 : 50
+            priority: (track.config.coded?.height ?? 720) <= 240 ? 65 : (track.config.coded?.height ?? 720) <= 360 ? 60 : (track.config.coded?.height ?? 720) <= 540 ? 55 : 50,
+            startAtLiveEdge: startAtLiveEdge
         )
     }
 }

@@ -235,7 +235,7 @@ final class PlaybackPipeline {
             do {
             let track = try VideoRendererTrack(trackName: fallback.name, epoch: initialVideoEpoch,
                 config: fallback.rawConfig, targetBuffering: targetBuffering, isRetainedFallback: true)
-            let sub = try mediaSource.subscribeMedia(MediaTrackRequest(track: fallback, targetBuffering: targetBuffering))
+            let sub = try mediaSource.subscribeMedia(mediaSource.videoRequest(track: fallback, targetBuffering: targetBuffering))
             let activity = VideoIngestActivity()
             let task = Self.makeVideoIngestTask(trackName: fallback.name, subscription: sub, track: track,
                 frameObserver: frameObserver, tracker: tracker, pipelineBus: pipelineBus,
@@ -350,7 +350,7 @@ final class PlaybackPipeline {
         let newSub: MediaTrack
         do {
             newSub = try retainedResources?.subscription ?? mediaSource.subscribeMedia(
-                MediaTrackRequest(track: track, targetBuffering: targetBuffering)
+                mediaSource.videoRequest(track: track, targetBuffering: targetBuffering)
             )
         } catch {
             tracker.emitSubscribeError(
@@ -413,7 +413,7 @@ final class PlaybackPipeline {
                     if downshift, !oldIsFallback, let oldInfo {
                         // A cancelled subscription cannot be restored by reusing its handle.
                         do {
-                            let sub = try self.mediaSource.subscribeMedia(MediaTrackRequest(track: oldInfo, targetBuffering: self.targetBuffering))
+                            let sub = try self.mediaSource.subscribeMedia(self.mediaSource.videoRequest(track: oldInfo, targetBuffering: self.targetBuffering))
                             self.videoSubscription = sub
                             self.videoTask = Self.makeVideoIngestTask(trackName: oldInfo.name, subscription: sub,
                                 track: oldRendererTrack, frameObserver: self.frameObserver, tracker: self.tracker,
