@@ -153,9 +153,9 @@ public struct Broadcast: Sendable {
     let mediaSource: BroadcastMediaSource
     var consumer: Moq.BroadcastConsumer { mediaSource.consumer }
 
-    init(path: String, consumer: Moq.BroadcastConsumer) {
+    init(path: String, consumer: Moq.BroadcastConsumer, liveMediaSubscriptionFactory: LiveMediaSubscriptionFactory? = nil) {
         self.path = path
-        self.mediaSource = BroadcastMediaSource(consumer: consumer)
+        self.mediaSource = BroadcastMediaSource(consumer: consumer, liveMediaSubscriptionFactory: liveMediaSubscriptionFactory)
     }
 
     /// Subscribes to a raw MoQ track by name.
@@ -272,12 +272,18 @@ private final class CatalogConsumerBox: @unchecked Sendable {
 
 final class BroadcastMediaSource: @unchecked Sendable {
     let consumer: Moq.BroadcastConsumer
+    let supportsFreshLiveMedia: Bool
 
     private let mediaSubscriptions: MediaSubscriptionRegistry
 
-    init(consumer: Moq.BroadcastConsumer) {
+    init(consumer: Moq.BroadcastConsumer, liveMediaSubscriptionFactory: LiveMediaSubscriptionFactory? = nil) {
         self.consumer = consumer
-        self.mediaSubscriptions = MediaSubscriptionRegistry(broadcast: consumer)
+        self.supportsFreshLiveMedia = liveMediaSubscriptionFactory != nil
+        self.mediaSubscriptions = MediaSubscriptionRegistry(broadcast: consumer, liveMediaSubscriptionFactory: liveMediaSubscriptionFactory)
+    }
+
+    func videoRequest(track: VideoTrackInfo, targetBuffering: Duration) -> MediaTrackRequest {
+        MediaTrackRequest(track: track, targetBuffering: targetBuffering, startAtLiveEdge: supportsFreshLiveMedia)
     }
 
     func subscribeMedia(
@@ -308,15 +314,17 @@ public final class BroadcastSubscription: @unchecked Sendable {
     private var announced: Moq.Announced?
     private var observeTask: Task<Void, Never>?
     private var finished = false
+    private let liveMediaSubscriptionFactory: LiveMediaSubscriptionFactory?
 
     var isFinished: Bool {
         lock.withLock { finished }
     }
 
-    init(prefix: String, session: Session, announced: Moq.Announced) {
+    init(prefix: String, session: Session, announced: Moq.Announced, liveMediaSubscriptionFactory: LiveMediaSubscriptionFactory? = nil) {
         self.prefix = prefix
         self.session = session
         self.announced = announced
+        self.liveMediaSubscriptionFactory = liveMediaSubscriptionFactory
 
         var continuation: AsyncStream<Broadcast>.Continuation!
         self.broadcasts = AsyncStream { continuation = $0 }
@@ -353,7 +361,8 @@ public final class BroadcastSubscription: @unchecked Sendable {
 
                 let broadcast = Broadcast(
                     path: announcement.path,
-                    consumer: announcement.broadcast
+                    consumer: announcement.broadcast,
+                    liveMediaSubscriptionFactory: liveMediaSubscriptionFactory
                 )
                 yield(broadcast)
             } catch MoqError.Cancelled {

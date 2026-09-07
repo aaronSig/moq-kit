@@ -161,3 +161,11 @@ through `@_spi(Testing) import MoQKit`. It drives the real bounded flush/fatal-e
 path only if the active track and epoch still match; it rejects repeat injection.
 Release builds omit this method. Label resulting evidence as controlled SDK
 lifecycle injection, not an observed AVFoundation driver or bitstream failure.
+
+## Fresh live reader integration
+
+`Session(url:liveMediaSubscriptionFactory:)` accepts a typed adapter for native libraries that expose a fresh live subscription operation. Catalog video requests use it for initial, pending, retained-fallback and restored video readers. Audio and generic requests keep cached delivery. `Session.supportsFreshLiveMedia` exposes whether the capability is configured.
+
+`MediaTrackRequest.startAtLiveEdge` defaults to false. An explicit true request without an adapter throws before creating upstream demand. The registry includes this mode in its key so a cached reader and a fresh reader never share a cursor or frame hub. The factory receives the requested priority and latency unchanged. A quiet live track may wait for its next group; use cached mode when the last picture or historical data is intended.
+
+The SDK still compiles with the published FFI: it does not reflect on an optional symbol or call an unavailable method. The host app with matching fork bindings supplies the actual `subscribeMediaLive` call and must record that capability in run metadata. Public tests verify routing, ownership and unsupported-mode rejection. Private integration tests must additionally prove that the real native operation skips cached groups across cancel/resubscribe without moving an existing reader.

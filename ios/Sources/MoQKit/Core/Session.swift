@@ -101,6 +101,8 @@ public actor Session {
     public nonisolated let state: AsyncStream<SessionState>
 
     private let url: String
+    private let liveMediaSubscriptionFactory: LiveMediaSubscriptionFactory?
+    public nonisolated let supportsFreshLiveMedia: Bool
 
     private let stateContinuation: AsyncStream<SessionState>.Continuation
     private var currentState: SessionState = .idle
@@ -121,8 +123,10 @@ public actor Session {
     /// Creates a new session.
     ///
     /// - Parameter url: The WebTransport URL of the MoQ relay (e.g. `"https://relay.example.com/moq"`).
-    public init(url: String) {
+    public init(url: String, liveMediaSubscriptionFactory: LiveMediaSubscriptionFactory? = nil) {
         self.url = url
+        self.liveMediaSubscriptionFactory = liveMediaSubscriptionFactory
+        self.supportsFreshLiveMedia = liveMediaSubscriptionFactory != nil
 
         var stateCont: AsyncStream<SessionState>.Continuation!
         self.state = AsyncStream { stateCont = $0 }
@@ -246,7 +250,8 @@ public actor Session {
         let subscription = BroadcastSubscription(
             prefix: prefix,
             session: self,
-            announced: announced
+            announced: announced,
+            liveMediaSubscriptionFactory: liveMediaSubscriptionFactory
         )
         activeSubscriptions[prefix] = subscription
         return subscription

@@ -87,7 +87,7 @@ extension PlaybackPipeline {
             )
             do {
                 subscriptions.video = try mediaSource.subscribeMedia(
-                    MediaTrackRequest(track: videoTrack, targetBuffering: maxLatency)
+                    mediaSource.videoRequest(track: videoTrack, targetBuffering: maxLatency)
                 )
             } catch {
                 if firstError == nil { firstError = error }
