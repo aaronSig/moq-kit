@@ -53,22 +53,27 @@ public struct MediaTrackRequest: Sendable, Equatable {
     public let container: MediaContainer
     /// Target live buffering depth for the upstream media subscription.
     public let targetBuffering: Duration
+    /// Delivery priority; larger values are scheduled ahead of smaller values.
+    public let priority: UInt8
 
     public init(
         name: String,
         container: MediaContainer,
-        targetBuffering: Duration = .milliseconds(100)
+        targetBuffering: Duration = .milliseconds(100),
+        priority: UInt8 = 0
     ) {
         self.name = name
         self.container = container
         self.targetBuffering = targetBuffering
+        self.priority = priority
     }
 
     init(track: AudioTrackInfo, targetBuffering: Duration) {
         self.init(
             name: track.name,
             container: MediaContainer(track.rawConfig.container),
-            targetBuffering: targetBuffering
+            targetBuffering: targetBuffering,
+            priority: 80
         )
     }
 
@@ -76,7 +81,8 @@ public struct MediaTrackRequest: Sendable, Equatable {
         self.init(
             name: track.name,
             container: MediaContainer(track.rawConfig.container),
-            targetBuffering: targetBuffering
+            targetBuffering: targetBuffering,
+            priority: (track.config.coded?.height ?? 720) <= 360 ? 60 : (track.config.coded?.height ?? 720) <= 540 ? 55 : 50
         )
     }
 }

@@ -17,6 +17,17 @@ import java.time.Duration
 
 class MediaSubscriptionRegistryTest {
     @Test
+    fun priorityReachesTheNativeSubscription() {
+        val consumer = FakeMediaConsumer()
+        val source = FakeMediaSubscriptionSource(consumer)
+        val registry = MediaSubscriptionRegistry(source)
+        val track = registry.subscribeMedia(MediaTrackRequest(name = "video", container = MediaContainer.Legacy, priority = 60u))
+        assertEquals(60.toUByte(), source.requests.single().priority)
+        track.close()
+        registry.close()
+    }
+
+    @Test
     fun subscribersShareOneUpstreamAndReceiveTheSameFrames() = runBlocking {
         val consumer = FakeMediaConsumer()
         val source = FakeMediaSubscriptionSource(consumer)
@@ -158,6 +169,7 @@ private class FakeMediaSubscriptionSource(
         val name: String,
         val container: MoqContainer,
         val maxLatencyMs: ULong,
+        val priority: UByte,
     )
 
     private val consumers = ArrayDeque(consumers.toList())
@@ -167,8 +179,9 @@ private class FakeMediaSubscriptionSource(
         name: String,
         container: MoqContainer,
         maxLatencyMs: ULong,
+        priority: UByte,
     ): MediaConsumerHandle {
-        requests += Request(name, container, maxLatencyMs)
+        requests += Request(name, container, maxLatencyMs, priority)
         return consumers.removeFirst()
     }
 }

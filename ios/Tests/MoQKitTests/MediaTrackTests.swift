@@ -4,6 +4,13 @@ import Moq
 import XCTest
 
 final class MediaTrackTests: XCTestCase {
+    func testExplicitPriorityDoesNotChangeMediaBuffering() {
+        let request = MediaTrackRequest(name: "video", container: .legacy, targetBuffering: .milliseconds(700), priority: 60)
+        XCTAssertEqual(request.priority, 60)
+        XCTAssertEqual(request.targetBuffering, .milliseconds(700))
+        XCTAssertEqual(MediaTrackRequest(name: "raw", container: .legacy).priority, 0)
+    }
+
     func testMediaContainerConvertsToMoqContainer() {
         XCTAssertEqual(MediaContainer(.legacy), .legacy)
         XCTAssertEqual(MediaContainer(.loc), .loc)

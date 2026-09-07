@@ -84,6 +84,7 @@ final class MediaSubscriptionRegistry: @unchecked Sendable {
                         name: request.name,
                         container: request.container.rawContainer,
                         subscription: Moq.Subscription(
+                            priority: request.priority,
                             latencyMaxMs: request.targetBuffering.millisecondsUInt64Clamped)
                     )
                 }
