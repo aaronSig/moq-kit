@@ -139,3 +139,25 @@ after the native read returns and before pipeline coroutine dispatch. Compare it
 with the event time to identify dispatch delay. It is not packet arrival, native
 container readiness or a cross-device clock. Application-created frames report
 no native provenance; the observation does not change frame equality or payload.
+
+
+### Fresh readers when returning to a live rendition
+
+A native reader can replay previously cached groups when returning to a rendition,
+then wait across the unrequested sequence gap before releasing current media.
+`Session(liveMediaSubscriptionFactory = ...)` accepts a typed optional bridge to a
+runtime with fresh-live support. With this capability, all catalog video ingests
+use fresh readers; audio and generic media keep ordinary cached delivery. Without
+it, existing cached behavior remains unchanged. The public SDK still builds with
+its published native dependency.
+
+A matched native integration supplies a `LiveMediaSubscriptionFactory` that calls
+its actual fresh-live API. The SDK forwards broadcast, track name, container,
+priority and buffering settings, and owns the returned consumer. Do not reflectively
+pretend the capability exists. Explicit `MediaTrackRequest(startAtLiveEdge = true)`
+without a factory fails before native demand. Fresh and cached requests have separate
+shared-subscription keys, so one reader cannot silently change another's start mode.
+
+Fresh readers may wait for the next group on a quiet track; use ordinary media
+subscriptions for cached last pictures or completed recordings. This removes one
+source of stale replay and does not by itself guarantee seamless delivery.

@@ -3,6 +3,7 @@ package com.swmansion.moqkit
 import android.util.Log
 import com.swmansion.moqkit.publish.Publisher
 import com.swmansion.moqkit.subscribe.BroadcastSubscription
+import com.swmansion.moqkit.subscribe.LiveMediaSubscriptionFactory
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -33,10 +34,13 @@ import dev.moq.OriginProducer
  * @param url Relay URL, for example `"https://relay.example.com:4443/anon"`.
  * @param parentScope Coroutine scope whose lifetime bounds background session work. In apps,
  *   pass a lifecycle-owned scope such as `lifecycleScope` or `viewModelScope`.
+ * @param liveMediaSubscriptionFactory Optional matched-runtime bridge for fresh video
+ *   subscriptions. Without it, catalog playback retains ordinary cached readers.
  */
 class Session(
     private val url: String,
     parentScope: CoroutineScope = CoroutineScope(Dispatchers.IO + SupervisorJob()),
+    private val liveMediaSubscriptionFactory: LiveMediaSubscriptionFactory? = null,
 ) {
     companion object {
         private const val TAG = "Session"
@@ -176,6 +180,7 @@ class Session(
                     prefix = prefix,
                     originConsumer = originConsumer,
                     announced = announced,
+                    liveMediaSubscriptionFactory = liveMediaSubscriptionFactory,
                     onClosed = {
                         synchronized(activeSubscriptions) {
                             if (activeSubscriptions[prefix] === subscriptionRef) {

@@ -453,7 +453,8 @@ internal class PlaybackPipeline(
     ): VideoIngestHandle {
         Log.d(TAG, "Subscribing to video track '${videoInfo.name}'")
         val videoMediaTrack = broadcastOwner.subscribeMedia(
-            MediaTrackRequest(track = videoInfo, targetBuffering = targetBuffering),
+            MediaTrackRequest(track = videoInfo, targetBuffering = targetBuffering)
+                .copy(startAtLiveEdge = broadcastOwner.supportsFreshLiveMedia),
         )
 
         val job = scope.launch {
