@@ -106,7 +106,11 @@ queued decoder output drains; duplicate timestamps retain submission-order
 metadata and old/new overlap cannot be presented backwards.
 
 Upgrade preparation is bounded and cancels when the playing track loses its
-reserve. The optional retained fallback track remains disabled unless explicitly
+reserve. A brief dip below the usual reserve watermark gets up to 200 ms to
+replenish, matching iOS grouped-delivery handling. Less than 200 ms remaining
+(or the configured minimum if smaller) cancels immediately. Replenishment resets
+only this pressure interval; it does not extend the original switch deadline.
+The optional retained fallback track remains disabled unless explicitly
 requested; enabling it adds continuous network demand. These policies are a lab
 baseline, not a guarantee of interruption-free switching or prompt recovery on
 all networks. Statistics include zero-frame windows so a frozen renderer is not

@@ -36,7 +36,8 @@ class DrainingSwitchTest {
     }
     @Test fun abandonAnUpgradeWhileTheOldPictureStillHasTimeToDrain() {
         val c=RenditionSwitchController(SwitchPolicy())
-        assertTrue(c.shouldAbandonUpgrade(700_000,750_000))
+        assertFalse(c.shouldAbandonUpgrade(700_000,750_000,0))
+        assertTrue(c.shouldAbandonUpgrade(700_000,750_000,200_000_000))
         assertFalse(c.shouldAbandonUpgrade(900_000,750_000))
         assertFalse(c.shouldAbandonUpgrade(0,0)) // A downshift must continue.
     }
