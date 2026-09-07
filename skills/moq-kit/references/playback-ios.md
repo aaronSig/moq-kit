@@ -117,3 +117,21 @@ The player calibrates the audio/video timestamp offset once both timelines are
 available. Replacing a video rendition preserves that calibration: cached media
 behind the current playhead is backlog, not a new source clock. Initial sources
 with separate audio/video timestamp domains still receive their fixed offset.
+
+### Rendition handoff ownership
+
+`Player.hasPendingVideoSwitch` and `videoBufferedAhead` expose pending ownership
+and admitted media lead. A selection request is not a completed switch. Pending
+video prepares on the existing source clock, retains its accepted keyframe and
+preroll, and is rechecked even when the old compressed queue is empty. Submitted
+old media must drain before the replacement becomes authoritative.
+
+Upgrades require preparation reserve and a bounded trial; a brief grouped-arrival
+dip has a grace period, while critically low reserve cancels immediately. A failed
+trial preserves the playing track. These policies improve lifecycle correctness;
+they do not establish a maximum downshift/recovery time under arbitrary networks.
+
+`warmFallbackVideoTrackName` is an optional experimental retained subscription,
+with `warmFallbackBufferedAhead`, `warmFallbackIsReceiving` and
+`warmFallbackReuseCount` observations. It defaults to nil and adds network demand
+when enabled. Leave it disabled in ordinary playback and bandwidth comparisons.

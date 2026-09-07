@@ -5,16 +5,40 @@ struct PlaybackSubscriptions {
     var audio: MediaTrack?
 }
 
+/// Tracks actual ingest termination independently from Task cancellation.
+final class VideoIngestActivity: @unchecked Sendable {
+    private let lock = NSLock()
+    private var running = true
+    var isRunning: Bool { lock.lock(); defer { lock.unlock() }; return running }
+    func finish() { lock.lock(); running = false; lock.unlock() }
+}
+
 /// Holds the previous video rendition alive until the renderer activates or aborts
 /// the pending rendition.
 final class TrackIngestHandle: @unchecked Sendable {
     private let lock = NSLock()
     private var task: Task<Void, Never>?
     private var subscription: MediaTrack?
+    private let activity: VideoIngestActivity?
 
-    init(task: Task<Void, Never>?, subscription: MediaTrack?) {
+    init(task: Task<Void, Never>?, subscription: MediaTrack?, activity: VideoIngestActivity? = nil) {
+        self.activity = activity
         self.task = task
         self.subscription = subscription
+    }
+
+    var isRunning: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return task != nil && subscription != nil && task?.isCancelled == false && activity?.isRunning != false
+    }
+
+    func snapshot() -> (task: Task<Void, Never>?, subscription: MediaTrack?) {
+        lock.lock(); defer { lock.unlock() }
+        return (task, subscription)
+    }
+
+    func close(unless retained: TrackIngestHandle?) {
+        if self !== retained { close() }
     }
 
     func close() {

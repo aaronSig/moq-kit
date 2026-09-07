@@ -54,6 +54,18 @@ final class VideoRendererTrack: @unchecked Sendable {
 
     let trackName: String
     let trackEpoch: TrackEpoch
+    let isRetainedFallback: Bool
+    private var activationEpoch: TrackEpoch
+    private var playbackActive = false
+    var playbackEpoch: TrackEpoch { lock.withLock { activationEpoch } }
+    var isPlaybackActive: Bool { lock.withLock { playbackActive } }
+    func setPlaybackActive(_ active: Bool) {
+        lock.withLock {
+            playbackActive = active
+            if active { buffer.releaseRetainedKeyframe() }
+        }
+    }
+    func setPlaybackEpoch(_ epoch: TrackEpoch) { lock.withLock { activationEpoch = epoch } }
     let processor: VideoFrameProcessor
     let timeline: TrackTimeline
     let bufferLimits: BufferLimits
@@ -62,16 +74,21 @@ final class VideoRendererTrack: @unchecked Sendable {
     private var mode: State = .buffering
     private var targetBufferingUs: UInt64
     private let lock = UnfairLock()
+    private var latestAdmitted: UInt64?
+    var latestAdmittedPtsUs: UInt64? { lock.withLock { latestAdmitted } }
     private var onDataAvailable: (() -> Void)?
 
     init(
         trackName: String,
         epoch: TrackEpoch,
         config: Moq.Video,
-        targetBuffering: Duration
+        targetBuffering: Duration,
+        isRetainedFallback: Bool = false
     ) throws {
         self.trackName = trackName
         self.trackEpoch = epoch
+        self.activationEpoch = epoch
+        self.isRetainedFallback = isRetainedFallback
         self.processor = try VideoFrameProcessor(config: config)
         self.timeline = TrackTimeline(
             policy: TimelinePolicy(
@@ -130,6 +147,7 @@ final class VideoRendererTrack: @unchecked Sendable {
                     outcome = .rejected(reason: .frameTooLarge, depth: depthBefore)
                     return
                 }
+                latestAdmitted = max(latestAdmitted ?? 0, timestampUs)
                 outcome = .admitted(
                     depth: buffer.depth(),
                     evictions: effects.filter {
@@ -187,7 +205,10 @@ final class VideoRendererTrack: @unchecked Sendable {
     // MARK: - State control (called from enqueueQueue)
 
     func setBufferState(_ state: State) {
-        lock.withLock { mode = state }
+        lock.withLock {
+            mode = state
+            if case .pending = state { buffer.releaseRetainedKeyframe() }
+        }
     }
 
     /// PTS of the first keyframe currently stored in the buffer, or `nil`.
@@ -201,6 +222,28 @@ final class VideoRendererTrack: @unchecked Sendable {
     /// Drop non-keyframe frames whose PTS is strictly less than `pts`.
     /// Stops at the first keyframe or at the first frame with PTS ≥ `pts`.
     /// Used to align the pending buffer's front to the cut-in keyframe before swap.
+    func discardBeforeNewestKeyframe(_ pts: UInt64) {
+        lock.withLock {
+            // Ingest may have observed pending state just before activation.
+            guard !playbackActive else { return }
+            buffer.discardBeforeNewestKeyframe(Int64(clamping: pts))
+        }
+    }
+
+    func retainCutInKeyframe(_ pts: UInt64) -> Bool {
+        lock.withLock { buffer.retainKeyframe(Int64(clamping: pts)) }
+    }
+
+    func releaseCutInKeyframe() {
+        lock.withLock { buffer.releaseRetainedKeyframe() }
+    }
+
+    func hasCutInCoverage(keyframePtsUs: UInt64, playheadUs: UInt64) -> Bool {
+        lock.withLock {
+            buffer.hasRetainedKeyframeCoverage(Int64(clamping: keyframePtsUs), through: Int64(clamping: playheadUs))
+        }
+    }
+
     func discardNonKeyframesBeforePts(_ pts: UInt64) {
         lock.withLock {
             while let front = buffer.peekFront(),
@@ -238,6 +281,7 @@ final class VideoRendererTrack: @unchecked Sendable {
 
     func flush() {
         lock.withLock {
+            latestAdmitted = nil
             _ = buffer.reset(epoch: trackEpoch)
             mode = .buffering
         }

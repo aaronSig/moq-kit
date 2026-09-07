@@ -239,6 +239,7 @@ struct PlaybackSampleStats {
         guard state.hasData else { return nil }
 
         return FrameArrivalStats(
+            lastArrivalAge: state.lastWallNs.map { .nanoseconds(Int64(clamping: now >= $0 ? now-$0 : 0)) },
             receivedFramesPerSecond: state.frameTimestamps.framesPerSecond(now: now),
             averageInterarrival: state.intervals.average,
             maxInterarrival: state.intervals.maxDuration,

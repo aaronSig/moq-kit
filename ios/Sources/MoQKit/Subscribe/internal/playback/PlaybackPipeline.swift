@@ -63,6 +63,7 @@ final class PlaybackPipeline {
 
     // MARK: - Track state
 
+    private var videoTrackInfo: VideoTrackInfo?
     private var videoTrackName: String?
     private var audioTrackName: String?
     private var videoEpoch: TrackEpoch = .zero
@@ -76,10 +77,15 @@ final class PlaybackPipeline {
     private var videoTask: Task<Void, Never>?
     private var coordinatorTask: Task<Void, Never>?
     private var pendingVideoCleanup: TrackIngestHandle?
+    private let warmFallbackInfo: VideoTrackInfo?
+    private var warmFallbackTrack: VideoRendererTrack?
+    private var warmFallbackHandle: TrackIngestHandle?
+    private(set) var warmFallbackReuseCount = 0
 
     init(
         mediaSource: BroadcastMediaSource,
         videoTrack: VideoTrackInfo?,
+        warmFallbackVideoTrack: VideoTrackInfo? = nil,
         audioTrack: AudioTrackInfo?,
         targetBuffering: Duration,
         volume: Float,
@@ -115,6 +121,7 @@ final class PlaybackPipeline {
             )
         }
 
+        self.warmFallbackInfo = warmFallbackVideoTrack
         self.mediaSource = mediaSource
         self.targetBuffering = targetBuffering
         self.tracker = tracker
@@ -124,6 +131,7 @@ final class PlaybackPipeline {
         self.audioTimeline = audioTimeline
         self.audioSubscription = subscriptions.audio
         self.videoSubscription = subscriptions.video
+        self.videoTrackInfo = videoTrack
         self.videoTrackName = videoTrack?.name
         self.audioTrackName = audioTrack?.name
         self.videoEpoch = initialVideoEpoch
@@ -156,7 +164,8 @@ final class PlaybackPipeline {
                 trackName: videoTrack.name,
                 epoch: initialVideoEpoch,
                 config: videoTrack.rawConfig,
-                targetBuffering: targetBuffering
+                targetBuffering: targetBuffering,
+                isRetainedFallback: videoTrack.name == warmFallbackVideoTrack?.name
             )
         } else {
             rendererTrack = nil
@@ -204,6 +213,7 @@ final class PlaybackPipeline {
         }
 
         if let videoSub = subscriptions.video, let rendererTrack {
+            let activity = VideoIngestActivity()
             self.videoTask = Self.makeVideoIngestTask(
                 trackName: videoTrack?.name ?? "unknown",
                 subscription: videoSub,
@@ -212,8 +222,31 @@ final class PlaybackPipeline {
                 tracker: tracker,
                 pipelineBus: pipelineBus,
                 targetBuffering: targetBuffering,
-                trackEpoch: initialVideoEpoch
+                trackEpoch: initialVideoEpoch,
+                activity: activity,
+                playbackPosition: { [weak renderer = self.videoRenderer] in renderer?.sourcePlaybackPositionUs }
             )
+            if rendererTrack.isRetainedFallback {
+                self.warmFallbackTrack = rendererTrack
+                self.warmFallbackHandle = TrackIngestHandle(task: videoTask, subscription: videoSub, activity: activity)
+            }
+        }
+        if let fallback = warmFallbackVideoTrack, warmFallbackHandle == nil {
+            do {
+            let track = try VideoRendererTrack(trackName: fallback.name, epoch: initialVideoEpoch,
+                config: fallback.rawConfig, targetBuffering: targetBuffering, isRetainedFallback: true)
+            let sub = try mediaSource.subscribeMedia(MediaTrackRequest(track: fallback, targetBuffering: targetBuffering))
+            let activity = VideoIngestActivity()
+            let task = Self.makeVideoIngestTask(trackName: fallback.name, subscription: sub, track: track,
+                frameObserver: frameObserver, tracker: tracker, pipelineBus: pipelineBus,
+                targetBuffering: targetBuffering, trackEpoch: initialVideoEpoch, activity: activity,
+                playbackPosition: { [weak renderer = self.videoRenderer] in renderer?.sourcePlaybackPositionUs })
+            self.warmFallbackTrack = track
+            self.warmFallbackHandle = TrackIngestHandle(task: task, subscription: sub, activity: activity)
+            } catch {
+                stop(reason: "standby subscription setup failed")
+                throw error
+            }
         }
 
         restartCoordinator()
@@ -268,6 +301,15 @@ final class PlaybackPipeline {
         )
     }
 
+    var videoBufferedAhead: Duration? { videoRenderer?.bufferedAhead }
+    var hasPendingVideoSwitch: Bool { videoRenderer?.hasPendingTrack ?? false }
+    var warmFallbackIsReceiving: Bool { warmFallbackHandle?.isRunning == true }
+    var warmFallbackBufferedAhead: Duration? {
+        guard let latest = warmFallbackTrack?.latestAdmittedPtsUs,
+              let playhead = videoRenderer?.sourcePlaybackPositionUs else { return nil }
+        return .microseconds(Int64(clamping: latest > playhead ? latest-playhead : 0))
+    }
+
     func setVolume(_ volume: Float) {
         audioRenderer?.setVolume(volume)
     }
@@ -279,6 +321,7 @@ final class PlaybackPipeline {
         )
         audioRenderer?.updateTargetLatency(latency)
         videoRenderer?.updateTargetBuffering(latency)
+        _ = warmFallbackTrack?.updateTargetBuffering(latency)
     }
 
     func switchVideo(
@@ -291,9 +334,17 @@ final class PlaybackPipeline {
         KitLogger.player.debug("Switching video track to \(track.name)")
         let nextEpoch = videoEpoch.next()
         tracker.emitSubscribeStart(kind: .video, trackName: track.name, trackEpoch: nextEpoch)
+        let reusableFallback = warmFallbackTrack?.trackName == track.name && warmFallbackHandle?.isRunning == true
+            ? warmFallbackTrack : nil
+        let retainedResources = reusableFallback == nil ? nil : warmFallbackHandle?.snapshot()
+        let newRendererTrack = try reusableFallback ?? VideoRendererTrack(
+            trackName: track.name, epoch: nextEpoch, config: track.rawConfig,
+            targetBuffering: targetBuffering, isRetainedFallback: track.name == warmFallbackInfo?.name)
+        newRendererTrack.setPlaybackEpoch(nextEpoch)
+        if reusableFallback != nil { warmFallbackReuseCount += 1 }
         let newSub: MediaTrack
         do {
-            newSub = try mediaSource.subscribeMedia(
+            newSub = try retainedResources?.subscription ?? mediaSource.subscribeMedia(
                 MediaTrackRequest(track: track, targetBuffering: targetBuffering)
             )
         } catch {
@@ -310,26 +361,29 @@ final class PlaybackPipeline {
             "[Switch] Video track: \(track.name), codec=\(track.config.codec), config=\(track.config.debugDescription), container=\(track.rawConfig.container.moqKitDescription)"
         )
 
-        let newRendererTrack = try VideoRendererTrack(
-            trackName: track.name,
-            epoch: nextEpoch,
-            config: track.rawConfig,
-            targetBuffering: targetBuffering
-        )
-
-        let oldHandle = TrackIngestHandle(task: videoTask, subscription: videoSubscription)
+        let oldInfo = videoTrackInfo
+        let oldRendererTrack = videoRenderer.activeIngestTrack
+        let downshift = (track.config.bitrate ?? 0) < (oldInfo?.config.bitrate ?? 0)
+        let oldIsFallback = oldRendererTrack === warmFallbackTrack
+        let oldHandle = oldIsFallback ? warmFallbackHandle! : TrackIngestHandle(task: videoTask, subscription: videoSubscription)
+        // Keep the retained lowest-rendition receive loop alive across upgrades.
+        if downshift { oldHandle.close(unless: warmFallbackHandle) }
         let oldTrackName = videoTrackName
         let oldEpoch = videoEpoch
         videoEpoch = nextEpoch
-        pendingVideoCleanup?.close()
+        pendingVideoCleanup?.close(unless: warmFallbackHandle)
         pendingVideoCleanup = oldHandle
 
+        let retainedHandle = self.warmFallbackHandle
         let trackerRef = self.tracker
         let switchedTrackName = track.name
         videoRenderer.setPendingTrack(
             newRendererTrack,
+            minimumTrialLeadUs: downshift ? 0 : targetBuffering.microsecondsUInt64Clamped*85/100,
+            minimumActiveLeadUs: downshift ? 0 : targetBuffering.microsecondsUInt64Clamped*75/100,
             onActivated: { [weak self] in
-                oldHandle.close()
+                oldHandle.close(unless: retainedHandle)
+                trackerRef.onMediaTrackStarted(kind: .video)
                 trackerRef.emitTrackSwitch(
                     kind: .video, trackName: switchedTrackName, trackEpoch: nextEpoch
                 )
@@ -338,23 +392,40 @@ final class PlaybackPipeline {
                     self.pendingVideoCleanup = nil
                 }
             },
-            onAborted: { [weak self] in
+            onAborted: { [weak self] expectedTrialAbort in
                 Task { @MainActor [weak self] in
                     guard let self, self.pendingVideoCleanup === oldHandle else { return }
-                    self.videoTask?.cancel()
-                    self.videoSubscription?.close()
-                    let restored = oldHandle.take()
+                    if newRendererTrack !== self.warmFallbackTrack {
+                        self.videoTask?.cancel()
+                        self.videoSubscription?.close()
+                    }
+                    let restored = oldIsFallback ? oldHandle.snapshot() : oldHandle.take()
                     self.videoTask = restored.task
                     self.videoSubscription = restored.subscription
+                    if downshift, !oldIsFallback, let oldInfo {
+                        // A cancelled subscription cannot be restored by reusing its handle.
+                        do {
+                            let sub = try self.mediaSource.subscribeMedia(MediaTrackRequest(track: oldInfo, targetBuffering: self.targetBuffering))
+                            self.videoSubscription = sub
+                            self.videoTask = Self.makeVideoIngestTask(trackName: oldInfo.name, subscription: sub,
+                                track: oldRendererTrack, frameObserver: self.frameObserver, tracker: self.tracker,
+                                pipelineBus: self.pipelineBus, targetBuffering: self.targetBuffering, trackEpoch: oldEpoch,
+                                playbackPosition: { [weak renderer = self.videoRenderer] in renderer?.sourcePlaybackPositionUs })
+                        } catch {
+                            self.tracker.emitSubscribeError(kind: .video, trackName: oldInfo.name,
+                                message: error.localizedDescription, trackEpoch: oldEpoch)
+                        }
+                    }
+                    self.videoTrackInfo = oldInfo
                     self.videoTrackName = oldTrackName
                     self.videoEpoch = oldEpoch
                     self.pendingVideoCleanup = nil
-                    self.tracker.emitSubscribeError(
-                        kind: .video,
-                        trackName: switchedTrackName,
-                        message: "Timed out waiting for a usable video keyframe",
-                        trackEpoch: nextEpoch
-                    )
+                    if !expectedTrialAbort {
+                        self.tracker.emitSubscribeError(
+                            kind: .video, trackName: switchedTrackName,
+                            message: "Timed out waiting for a usable video keyframe", trackEpoch: nextEpoch
+                        )
+                    }
                     onAborted(oldTrackName)
                     self.restartCoordinator()
                 }
@@ -362,8 +433,10 @@ final class PlaybackPipeline {
         )
 
         videoSubscription = newSub
+        videoTrackInfo = track
         videoTrackName = track.name
-        videoTask = Self.makeVideoIngestTask(
+        let activity = VideoIngestActivity()
+        videoTask = retainedResources?.task ?? Self.makeVideoIngestTask(
             trackName: track.name,
             subscription: newSub,
             track: newRendererTrack,
@@ -371,8 +444,15 @@ final class PlaybackPipeline {
             tracker: tracker,
             pipelineBus: pipelineBus,
             targetBuffering: targetBuffering,
-            trackEpoch: nextEpoch
+            trackEpoch: nextEpoch,
+            activity: activity,
+            playbackPosition: { [weak renderer = self.videoRenderer] in renderer?.sourcePlaybackPositionUs }
         )
+        if newRendererTrack.isRetainedFallback && reusableFallback == nil {
+            warmFallbackHandle?.close()
+            warmFallbackTrack = newRendererTrack
+            warmFallbackHandle = TrackIngestHandle(task: videoTask, subscription: newSub, activity: activity)
+        }
         restartCoordinator()
         return .handled
     }
@@ -434,11 +514,16 @@ final class PlaybackPipeline {
         )
         coordinatorTask?.cancel()
         audioTask?.cancel()
-        videoTask?.cancel()
-        pendingVideoCleanup?.close()
+        if videoSubscription !== warmFallbackHandle?.snapshot().subscription {
+            videoTask?.cancel()
+            videoSubscription?.close()
+        }
+        pendingVideoCleanup?.close(unless: warmFallbackHandle)
+        warmFallbackHandle?.close()
+        warmFallbackHandle = nil
+        warmFallbackTrack = nil
 
         audioSubscription?.close()
-        videoSubscription?.close()
 
         audioTask = nil
         videoTask = nil
@@ -496,21 +581,28 @@ extension PlaybackPipeline {
         tracker: PlaybackStatsTracker,
         pipelineBus: PipelineBus,
         targetBuffering: Duration,
-        trackEpoch: TrackEpoch
+        trackEpoch: TrackEpoch,
+        activity: VideoIngestActivity = VideoIngestActivity(),
+        playbackPosition: @escaping @Sendable () -> UInt64? = { nil }
     ) -> Task<Void, Never> {
         Task.detached {
             var firstAcceptedFrame = true
             let context = PipelineContextFactory(trackId: trackName, mediaKind: .video)
-            frameObserver.onMediaTrackStarted(kind: .video)
+            if track.isPlaybackActive { frameObserver.onMediaTrackStarted(kind: .video) }
 
             defer {
+                activity.finish()
                 KitLogger.player.debug("Exited video reading task track=\(trackName), cancelled=\(Task.isCancelled)")
             }
 
             do {
                 for try await frame in subscription.frames {
                     if Task.isCancelled { break }
-                    frameObserver.onMediaFrame(kind: .video, frame: frame)
+                    let isActive = track.isPlaybackActive
+                    if isActive { frameObserver.onMediaFrame(kind: .video, frame: frame) }
+                    if !isActive, let position = playbackPosition() {
+                        track.timeline.onPlaybackPosition(Int64(clamping: position))
+                    }
                     let ptsUs = Int64(clamping: frame.timestampUs)
                     pipelineBus.emit(.frameArrived(
                         context: context.make(),
@@ -571,7 +663,7 @@ extension PlaybackPipeline {
                                 bytes: discarded.bytes
                             ))
                         }
-                        if let gapUs {
+                        if isActive, let gapUs {
                             frameObserver.onMediaDiscontinuity(kind: .video, gapUs: gapUs)
                         }
                         guard resumeFrom != nil else { continue }
@@ -663,6 +755,9 @@ extension PlaybackPipeline {
                         ))
                     }
 
+                    if !isActive, let position = playbackPosition() {
+                        track.discardBeforeNewestKeyframe(position)
+                    }
                     if insertOutcome.accepted && firstAcceptedFrame {
                         firstAcceptedFrame = false
                         KitLogger.player.debug(

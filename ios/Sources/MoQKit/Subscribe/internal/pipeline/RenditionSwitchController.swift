@@ -18,6 +18,7 @@ enum RenditionSwitchDecision: Equatable {
 final class RenditionSwitchController {
     private let policy: SwitchPolicy
     private var switchStartedNanos: UInt64?
+    private var reservePressureStartedNanos: UInt64?
 
     private(set) var state: RenditionSwitchState = .steady
 
@@ -28,7 +29,26 @@ final class RenditionSwitchController {
     func begin(targetTrack: String, nowNanos: UInt64) {
         precondition(!targetTrack.isEmpty, "target track must not be empty")
         switchStartedNanos = nowNanos
+        reservePressureStartedNanos = nil
         state = .preparing(targetTrack: targetTrack, startedNanos: nowNanos)
+    }
+
+    func shouldAbandonUpgrade(nowNanos: UInt64, bufferedAheadUs: UInt64, minimumAheadUs: UInt64) -> Bool {
+        guard minimumAheadUs > 0, bufferedAheadUs < minimumAheadUs else {
+            reservePressureStartedNanos = nil
+            return false
+        }
+        // A healthy quarter-second arrival burst can briefly cross the normal
+        // reserve watermark. Give that dip time to replenish, but never defer
+        // cancellation once the remaining presentation reserve is critical.
+        if bufferedAheadUs < min(minimumAheadUs, 200_000) { return true }
+        let started = reservePressureStartedNanos ?? nowNanos
+        reservePressureStartedNanos = started
+        return nowNanos >= started && nowNanos-started >= 200_000_000
+    }
+
+    func canPromoteUpgrade(elapsedNanos: UInt64, bufferedAheadUs: UInt64, minimumAheadUs: UInt64) -> Bool {
+        elapsedNanos >= 1_500_000_000 && bufferedAheadUs >= minimumAheadUs
     }
 
     func onKeyframeAvailable(
@@ -37,12 +57,17 @@ final class RenditionSwitchController {
     ) -> RenditionSwitchDecision {
         guard case .preparing(let target, _) = state else { return .wait }
         let gap = activePtsUs > keyframePtsUs ? activePtsUs - keyframePtsUs : 0
-        if gap > UInt64(policy.flushThresholdUs) {
-            state = .flushSwap(targetTrack: target)
-            return .flushSwap
-        }
+        // Aligned rendition tracks share their source clock. A cached keyframe
+        // far behind that clock is backlog, not a new timestamp domain.
+        guard gap <= UInt64(policy.cutInWindowUs) else { return .wait }
         state = .cuttingIn(targetTrack: target, keyframePtsUs: keyframePtsUs)
         return .wait
+    }
+
+    /// Losing an accepted keyframe invalidates readiness, not the original deadline.
+    func retryPreparation() {
+        guard case .cuttingIn(let target, _) = state, let started = switchStartedNanos else { return }
+        state = .preparing(targetTrack: target, startedNanos: started)
     }
 
     func onActiveProgress(_ activePtsUs: UInt64) -> RenditionSwitchDecision {
@@ -68,6 +93,7 @@ final class RenditionSwitchController {
         let elapsed = nowNanos >= started ? nowNanos - started : 0
         guard elapsed >= UInt64(policy.keyframeTimeoutUs) * 1_000 else { return .wait }
         switchStartedNanos = nil
+        reservePressureStartedNanos = nil
         state = .steady
         return .abort(targetTrack: target)
     }
@@ -79,6 +105,7 @@ final class RenditionSwitchController {
 
     func complete() {
         switchStartedNanos = nil
+        reservePressureStartedNanos = nil
         state = .steady
     }
 }

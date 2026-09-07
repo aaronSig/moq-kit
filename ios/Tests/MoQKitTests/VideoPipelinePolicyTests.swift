@@ -14,7 +14,7 @@ final class RenditionSwitchControllerTests: XCTestCase {
         XCTAssertEqual(controller.onActiveProgress(1_100), .cutIn(keyframePtsUs: 1_100))
     }
 
-    func testOldKeyframeRequiresFlushSwap() {
+    func testOldCachedKeyframeWaitsWithoutMovingThePlayingClock() {
         let controller = RenditionSwitchController(
             policy: SwitchPolicy(flushThresholdUs: 2_000_000)
         )
@@ -25,8 +25,10 @@ final class RenditionSwitchControllerTests: XCTestCase {
                 activePtsUs: 3_000_001,
                 keyframePtsUs: 1_000_000
             ),
-            .flushSwap
+            .wait
         )
+        XCTAssertEqual(controller.onActiveProgress(3_000_001), .wait)
+        XCTAssertEqual(controller.onTime(nowNanos: 5_000_000_000), .abort(targetTrack: "high"))
     }
 
     func testPreparingSwitchAbortsAfterTimeout() {

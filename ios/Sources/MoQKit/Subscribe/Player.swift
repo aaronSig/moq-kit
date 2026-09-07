@@ -106,6 +106,8 @@ public struct StallStats: Sendable {
 
 /// Arrival timing diagnostics for one received media stream.
 public struct FrameArrivalStats: Sendable {
+    /// Age of the latest arrival, including an interruption still in progress.
+    public var lastArrivalAge: Duration? = nil
     /// Received compressed frames per second over the recent rolling window.
     public let receivedFramesPerSecond: Double?
     /// Average wall-clock interval between received frames over the recent rolling window.
@@ -189,6 +191,7 @@ public final class Player {
     private let catalog: Catalog
     private var selectedVideoTrack: VideoTrackInfo?
     private var selectedAudioTrack: AudioTrackInfo?
+    private let warmFallbackVideoTrack: VideoTrackInfo?
     private var targetBuffering: Duration
     private var storedAudioVolume: Float
     private let events: PlayerEventHub
@@ -215,6 +218,8 @@ public final class Player {
     ///     consumer already subscribed to a selected track from the same catalog source, the existing
     ///     shared media subscription's upstream latency is reused.
     ///   - volume: Initial per-player audio output volume, clamped to `0...1`.
+    ///   - warmFallbackVideoTrackName: Optional lowest rendition to receive as bounded
+    ///     compressed standby media across upgrades. Off by default; adds network traffic.
     /// - Throws: ``SessionError/noTracksSelected`` if both media types are disabled.
     /// - Throws: ``SessionError/invalidConfiguration(_:)`` if a requested track name does
     ///   not exist in the catalog.
@@ -223,7 +228,8 @@ public final class Player {
         videoTrackName: String? = nil,
         audioTrackName: String? = nil,
         targetBuffering: Duration = .milliseconds(100),
-        volume: Float = 1.0
+        volume: Float = 1.0,
+        warmFallbackVideoTrackName: String? = nil
     ) throws {
         let selection = try Self.resolveSelection(
             in: catalog,
@@ -231,6 +237,15 @@ public final class Player {
             audioTrackName: audioTrackName
         )
 
+        let fallback = try Self.resolveVideoTrack(named: warmFallbackVideoTrackName, in: catalog)
+        if let fallback {
+            guard let selected = selection.videoTrack,
+                  fallback.config.codec.split(separator: ".").first == selected.config.codec.split(separator: ".").first,
+                  (fallback.config.bitrate ?? 0) <= (selected.config.bitrate ?? 0) else {
+                throw SessionError.invalidConfiguration("Warm fallback must use the selected codec at an equal or lower bitrate")
+            }
+        }
+        self.warmFallbackVideoTrack = fallback
         self.catalog = catalog
         self.selectedVideoTrack = selection.videoTrack
         self.selectedAudioTrack = selection.audioTrack
@@ -281,6 +296,13 @@ public final class Player {
     /// Follows ``Player`` main-actor isolation.
     /// Values are sampled over the most recent one-second window. See ``PlaybackStats``
     /// for field-level documentation.
+    /// Received video ahead of the presentation clock, including display-queued frames.
+    public var videoBufferedAhead: Duration? { playbackPipeline?.videoBufferedAhead }
+    public var hasPendingVideoSwitch: Bool { playbackPipeline?.hasPendingVideoSwitch ?? false }
+    public var warmFallbackBufferedAhead: Duration? { playbackPipeline?.warmFallbackBufferedAhead }
+    public var warmFallbackIsReceiving: Bool { playbackPipeline?.warmFallbackIsReceiving ?? false }
+    public var warmFallbackReuseCount: Int { playbackPipeline?.warmFallbackReuseCount ?? 0 }
+
     public var stats: PlaybackStats {
         tracker.currentStats()
     }
@@ -510,6 +532,7 @@ public final class Player {
         return try PlaybackPipeline(
             mediaSource: catalog.mediaSource,
             videoTrack: selectedVideoTrack,
+            warmFallbackVideoTrack: warmFallbackVideoTrack,
             audioTrack: selectedAudioTrack,
             targetBuffering: targetBuffering,
             volume: storedAudioVolume,

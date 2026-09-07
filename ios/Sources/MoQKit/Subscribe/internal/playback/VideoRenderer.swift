@@ -49,9 +49,12 @@ final class VideoRenderer: @unchecked Sendable {
     // MARK: - Track-switch state
 
     private var activeTrack: VideoRendererTrack
+    private var trialStartedNs: UInt64 = 0
+    private var minimumTrialLeadUs: UInt64 = 0
+    private var minimumActiveLeadUs: UInt64 = 0
     private var pendingTrack: VideoRendererTrack?
     private var onTrackActivated: (() -> Void)?
-    private var onTrackAborted: (() -> Void)?
+    private var onTrackAborted: ((Bool) -> Void)?
 
     // MARK: - Queue and timing dependencies
 
@@ -117,6 +120,7 @@ final class VideoRenderer: @unchecked Sendable {
 
         timing.attachVideoLayer(layer)
         self.timelineStarted = !timing.isVideoDriven
+        activeTrack.setPlaybackActive(true)
     }
 
     // MARK: - Public API
@@ -138,9 +142,10 @@ final class VideoRenderer: @unchecked Sendable {
                 "VideoRenderer stopping clock=\(self.timing.isVideoDriven ? "video-driven" : "audio-driven"), timelineStarted=\(self.timelineStarted), bufferFillMs=\(self.activeTrack.depthMs), hasPendingTrack=\(self.pendingTrack != nil)"
             )
             activeTrack.setOnDataAvailable(nil)
+            activeTrack.setPlaybackActive(false)
             pendingTrack?.setOnDataAvailable(nil)
             pendingTrack = nil
-            onTrackAborted?()
+            onTrackAborted?(false)
             onTrackAborted = nil
             switchController.complete()
             onTrackActivated = nil
@@ -188,16 +193,21 @@ final class VideoRenderer: @unchecked Sendable {
     /// `onActivated` is called on `enqueueQueue` at the moment of the swap.
     func setPendingTrack(
         _ track: VideoRendererTrack,
+        minimumTrialLeadUs: UInt64 = 0,
+        minimumActiveLeadUs: UInt64 = 0,
         onActivated: @escaping () -> Void,
-        onAborted: @escaping () -> Void
+        onAborted: @escaping (Bool) -> Void
     ) {
         enqueueQueue.async {
             KitLogger.player.debug("VideoRenderer installed pending track for seamless switch")
             // Discard any previous pending track without firing its callback.
             self.pendingTrack?.setOnDataAvailable(nil)
-            self.onTrackAborted?()
+            self.onTrackAborted?(false)
             track.setBufferState(.pending)
             self.pendingTrack = track
+            self.minimumTrialLeadUs = minimumTrialLeadUs
+            self.minimumActiveLeadUs = minimumActiveLeadUs
+            self.trialStartedNs = DispatchTime.now().uptimeNanoseconds
             self.onTrackActivated = onActivated
             self.onTrackAborted = onAborted
             self.switchController.begin(
@@ -208,6 +218,10 @@ final class VideoRenderer: @unchecked Sendable {
             // Re-arm so the loop re-evaluates the swap strategy when pending gets data.
             track.setOnDataAvailable(self.makeDataAvailableCallback())
             self.scheduleSwitchTimeout()
+            // A downshift can become ready between keyframes after active input
+            // drains. Recheck both directions even without another data callback.
+            self.schedulePendingSwitchCheck(track)
+            self.armVideoEnqueue()
         }
     }
 
@@ -228,6 +242,14 @@ final class VideoRenderer: @unchecked Sendable {
     var bufferFill: Duration { syncOnEnqueueQueue { activeTrack.depth } }
 
     var hasPendingTrack: Bool { syncOnEnqueueQueue { pendingTrack != nil } }
+    var activeIngestTrack: VideoRendererTrack { syncOnEnqueueQueue { activeTrack } }
+    var bufferedAhead: Duration? { syncOnEnqueueQueue {
+        guard let latest = activeTrack.latestAdmittedPtsUs else { return nil }
+        let playhead = currentSourceVideoTimeUs()
+        return .microseconds(Int64(clamping: latest > playhead ? latest-playhead : 0))
+    } }
+
+    var sourcePlaybackPositionUs: UInt64 { syncOnEnqueueQueue { currentSourceVideoTimeUs() } }
 
     var activeTimeline: TrackTimeline { syncOnEnqueueQueue { activeTrack.timeline } }
 
@@ -298,6 +320,19 @@ final class VideoRenderer: @unchecked Sendable {
         return try enqueueQueue.sync(execute: body)
     }
 
+    private func schedulePendingSwitchCheck(_ track: VideoRendererTrack) {
+        enqueueQueue.asyncAfter(deadline: .now() + 0.05) { [weak self, weak track] in
+            guard let self, let track, self.pendingTrack === track else { return }
+            let previousActive = self.activeTrack
+            self.advancePendingTrackSwapIfNeeded()
+            // A timer can commit after the display requested all queued input.
+            // The new track already has data, so its empty-to-nonempty callback
+            // will not fire. Resume draining it explicitly on that commit.
+            if self.activeTrack !== previousActive { self.armVideoEnqueue() }
+            if self.pendingTrack === track { self.schedulePendingSwitchCheck(track) }
+        }
+    }
+
     private func advancePendingTrackSwapIfNeeded() {
         guard let pending = pendingTrack else { return }
 
@@ -310,7 +345,29 @@ final class VideoRenderer: @unchecked Sendable {
             return
         }
 
+        if minimumTrialLeadUs > 0 {
+            if let activeLatest = activeTrack.latestAdmittedPtsUs,
+               switchController.shouldAbandonUpgrade(nowNanos: DispatchTime.now().uptimeNanoseconds,
+                   bufferedAheadUs: activeLatest > sourcePlayheadUs ? activeLatest-sourcePlayheadUs : 0,
+                   minimumAheadUs: minimumActiveLeadUs) {
+                abortPendingSwitch(expectedTrialAbort: true)
+                return
+            }
+            // Preparation reserve is a readiness test, not a moving cut-in deadline.
+            if case .preparing = switchController.state {
+                guard let latest = pending.latestAdmittedPtsUs, latest >= sourcePlayheadUs,
+                      switchController.canPromoteUpgrade(elapsedNanos: DispatchTime.now().uptimeNanoseconds-trialStartedNs,
+                        bufferedAheadUs: latest-sourcePlayheadUs, minimumAheadUs: minimumTrialLeadUs) else { return }
+            }
+        }
         if case .preparing = switchController.state {
+            // Keep the old display tail until a fresh replacement is ready. Once
+            // accepted, its reserve naturally drains while waiting for cut-in.
+            let minimumCutInLeadUs = min(250_000, pending.targetBuffering.microsecondsUInt64Clamped / 4)
+            guard let pendingLatest = pending.latestAdmittedPtsUs,
+                  pendingLatest >= sourcePlayheadUs,
+                  pendingLatest-sourcePlayheadUs >= minimumCutInLeadUs else { return }
+            pending.discardBeforeNewestKeyframe(sourcePlayheadUs)
             discardStalePendingFrames(from: pending, sourcePlayheadUs: sourcePlayheadUs)
             if let keyframePts = pending.firstKeyframePts {
                 let decision = switchController.onKeyframeAvailable(
@@ -319,7 +376,11 @@ final class VideoRenderer: @unchecked Sendable {
                 )
                 if decision == .flushSwap {
                     emitSwitchProgress(.flushSwap, track: pending)
-                } else {
+                } else if case .cuttingIn = switchController.state {
+                    guard pending.retainCutInKeyframe(keyframePts) else {
+                        switchController.retryPreparation()
+                        return
+                    }
                     emitSwitchProgress(.cutIn, track: pending)
                 }
             }
@@ -327,6 +388,13 @@ final class VideoRenderer: @unchecked Sendable {
 
         switch switchController.onActiveProgress(sourcePlayheadUs) {
         case .cutIn(let keyframePts):
+            guard !switchController.shouldDiscardPendingDelta(activePtsUs: sourcePlayheadUs, framePtsUs: keyframePts),
+                  pending.hasCutInCoverage(keyframePtsUs: keyframePts, playheadUs: sourcePlayheadUs) else {
+                pending.releaseCutInKeyframe()
+                switchController.retryPreparation()
+                emitSwitchProgress(.preparing, track: pending)
+                return
+            }
             pending.discardNonKeyframesBeforePts(keyframePts)
             pending.setBufferState(.playing)
             performSwap(to: pending)
@@ -478,7 +546,7 @@ final class VideoRenderer: @unchecked Sendable {
             trackName: activeTrack.trackName,
             sourceTimestampUs: sourceTimestampUs,
             targetBuffering: activeTrack.targetBuffering,
-            trackEpoch: activeTrack.trackEpoch
+            trackEpoch: activeTrack.playbackEpoch
         )
 
         delegate?.videoRenderer(
@@ -544,11 +612,10 @@ final class VideoRenderer: @unchecked Sendable {
             hasLoggedNoActiveFrame = true
         }
 
-        // Emergency swap: active drained completely but pending has a keyframe.
-        if promotePendingTrackIfReady() {
-            armVideoEnqueue()
-            return
-        }
+        // The display layer queues compressed input ahead of presentation. An
+        // empty input queue does not mean that its displayed tail is exhausted.
+        // The normal drain path and timed guard are the only switch authority;
+        // both enforce timestamp alignment and the upgrade reserve/trial.
 
         evaluateVideoStallStart()
     }
@@ -633,19 +700,6 @@ final class VideoRenderer: @unchecked Sendable {
         videoStallCause = nil
     }
 
-    @discardableResult
-    private func promotePendingTrackIfReady() -> Bool {
-        guard let pending = pendingTrack,
-            pending.peekFront()?.isKeyframe == true
-        else {
-            return false
-        }
-
-        pending.setBufferState(.playing)
-        performSwap(to: pending)
-        return true
-    }
-
     private func scheduleDrainWakeup(_ delay: RenderDelay) {
         let wakeAtUs =
             delay.frontDisplayTimeUs > delay.renderLeadUs
@@ -724,7 +778,9 @@ final class VideoRenderer: @unchecked Sendable {
     /// the data-available callback. Must be called on `enqueueQueue`.
     private func performSwap(to newTrack: VideoRendererTrack) {
         activeTrack.setOnDataAvailable(nil)
+        activeTrack.setPlaybackActive(false)
         activeTrack = newTrack
+        newTrack.setPlaybackActive(true)
         timestampMapper?.setVideoTimeline(newTrack.timeline)
         pendingTrack = nil
         switchController.complete()
@@ -744,7 +800,9 @@ final class VideoRenderer: @unchecked Sendable {
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
             self.pendingSwitchTimeout = nil
+            let previousActive = self.activeTrack
             self.advancePendingTrackSwapIfNeeded()
+            if self.activeTrack !== previousActive { self.armVideoEnqueue() }
         }
         pendingSwitchTimeout = work
         enqueueQueue.asyncAfter(
@@ -753,15 +811,17 @@ final class VideoRenderer: @unchecked Sendable {
         )
     }
 
-    private func abortPendingSwitch() {
+    private func abortPendingSwitch(expectedTrialAbort: Bool = false) {
         guard let pending = pendingTrack else { return }
         pending.setOnDataAvailable(nil)
-        pending.flush()
+        pending.releaseCutInKeyframe()
+        if !pending.isRetainedFallback { pending.flush() }
         pendingTrack = nil
         pendingSwitchTimeout?.cancel()
         pendingSwitchTimeout = nil
+        switchController.complete()
         emitSwitchProgress(.aborted, track: pending)
-        onTrackAborted?()
+        onTrackAborted?(expectedTrialAbort)
         onTrackAborted = nil
         onTrackActivated = nil
     }
