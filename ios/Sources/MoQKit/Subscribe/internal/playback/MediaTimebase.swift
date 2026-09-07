@@ -1,4 +1,5 @@
 import AVFoundation
+import Atomics
 import CoreMedia
 import Foundation
 
@@ -35,6 +36,8 @@ enum MediaClockTime {
 /// (video-only mode) or just observe it (audio-driven mode).
 protocol MediaPlaybackClock: AnyObject, Sendable {
     var currentTimeUs: UInt64 { get }
+    /// A zero clock value is valid only after an explicit media timestamp anchor.
+    var isAnchored: Bool { get }
     var isVideoDriven: Bool { get }
     func currentTime() -> CMTime
     func setTimeUs(_ timestampUs: UInt64)
@@ -49,6 +52,8 @@ protocol MediaPlaybackClock: AnyObject, Sendable {
 /// Shared playback clock.
 final class AudioDrivenClock: MediaPlaybackClock, @unchecked Sendable {
     private let cmTimebase: CMTimebase
+    private let anchored = ManagedAtomic(false)
+    var isAnchored: Bool { anchored.load(ordering: .acquiring) }
 
     convenience init() throws {
         var tb: CMTimebase?
@@ -71,10 +76,11 @@ final class AudioDrivenClock: MediaPlaybackClock, @unchecked Sendable {
     }
 
     func setTimeUs(_ timestampUs: UInt64) {
-        CMTimebaseSetTime(
+        let result = CMTimebaseSetTime(
             cmTimebase,
             time: MediaClockTime.cmTime(timestampUs: timestampUs)
         )
+        if result == noErr { anchored.store(true, ordering: .releasing) }
     }
 
     func setRate(_ rate: Double) {
@@ -115,6 +121,8 @@ final class AudioDrivenClock: MediaPlaybackClock, @unchecked Sendable {
 final class VideoDrivenClock: MediaPlaybackClock, @unchecked Sendable {
     private let synchronizer: AVSampleBufferRenderSynchronizer
     private weak var attachedLayer: AVSampleBufferDisplayLayer?
+    private let anchored = ManagedAtomic(false)
+    var isAnchored: Bool { anchored.load(ordering: .acquiring) }
 
     init() {
         self.synchronizer = AVSampleBufferRenderSynchronizer()
@@ -126,6 +134,7 @@ final class VideoDrivenClock: MediaPlaybackClock, @unchecked Sendable {
             synchronizer.rate,
             time: MediaClockTime.cmTime(timestampUs: timestampUs)
         )
+        anchored.store(true, ordering: .releasing)
     }
 
     func setRate(_ rate: Double) {
@@ -134,6 +143,7 @@ final class VideoDrivenClock: MediaPlaybackClock, @unchecked Sendable {
 
     func setRate(_ rate: Double, timeUs: UInt64) {
         synchronizer.setRate(Float(rate), time: MediaClockTime.cmTime(timestampUs: timeUs))
+        anchored.store(true, ordering: .releasing)
     }
 
     func attachVideoLayer(_ displayLayer: AVSampleBufferDisplayLayer) {

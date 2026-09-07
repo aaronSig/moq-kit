@@ -169,3 +169,22 @@ lifecycle injection, not an observed AVFoundation driver or bitstream failure.
 `MediaTrackRequest.startAtLiveEdge` defaults to false. An explicit true request without an adapter throws before creating upstream demand. The registry includes this mode in its key so a cached reader and a fresh reader never share a cursor or frame hub. The factory receives the requested priority and latency unchanged. A quiet live track may wait for its next group; use cached mode when the last picture or historical data is intended.
 
 The SDK still compiles with the published FFI: it does not reflect on an optional symbol or call an unavailable method. The host app with matching fork bindings supplies the actual `subscribeMediaLive` call and must record that capability in run metadata. Public tests verify routing, ownership and unsupported-mode rejection. Private integration tests must additionally prove that the real native operation skips cached groups across cancel/resubscribe without moving an existing reader.
+
+### Startup metrics require a media clock anchor
+
+Latency, video buffer reserve, and the source playback position are unknown until
+an audio or video renderer explicitly anchors the playback clock to a media
+timestamp. Preserve `nil` as unknown in telemetry and UI; do not turn it into zero.
+A timestamp of zero is valid after an explicit anchor.
+
+Before this guard, a live source with several hours of timestamp history could
+report those hours as latency and queued video during startup. These values were
+the difference between the source timestamp and an uninitialized clock, not a
+real playback backlog. Measuring an unanchored video position could also update
+the track's playback position while the clock was still unknown.
+
+`MediaTimebaseTests` checks audio/video anchor state and latency, including a
+valid zero timestamp. `python3 tests/regressions/ios-unanchored-video-metrics.py`
+replays the actual renderer metric getters and checks unknown reserve, no
+unanchored position mutation, and normal values after an anchor. These metrics
+measure the media timeline; they do not measure camera-to-screen latency.
