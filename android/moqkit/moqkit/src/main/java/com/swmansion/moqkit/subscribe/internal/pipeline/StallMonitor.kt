@@ -108,7 +108,19 @@ internal class StallMonitor(
         return listOf(PipelineEvent.StallStarted(contextAt(nowNanos), cause))
     }
 
+    /** Finish an in-flight diagnostic when its transport is intentionally retired. */
+    fun finish(nowNanos: Long): List<PipelineEvent> {
+        candidate = null
+        val active = stalled ?: return emptyList()
+        stalled = null
+        return listOf(PipelineEvent.StallEnded(contextAt(nowNanos), active.cause,
+            nanosToMillis((nowNanos - active.startedNanos).coerceAtLeast(0L))))
+    }
+
     private fun attribute(nowNanos: Long): StallCause? {
+        // Buffered rendering can continue while a cancelled/slow ingest is silent.
+        // Attribute a playback stall only once downstream progress also stops.
+        if (isFresh(lastRenderNanos, policy.renderProgressUs, nowNanos)) return null
         if (switchPhase == SwitchPhase.PREPARING) return StallCause.SWITCH_STALL
 
         if (!isFresh(lastIngestNanos, policy.arrivalGapUs, nowNanos)) {
