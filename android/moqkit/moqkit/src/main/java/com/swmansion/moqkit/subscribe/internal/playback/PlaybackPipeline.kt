@@ -522,6 +522,7 @@ internal class PlaybackPipeline(
                     pipelineBus.emit(
                         PipelineEvent.FrameArrived(
                             context = eventContext,
+                            nativeReadyNanos = frame.nativeReadyNanos,
                             ptsUs = frame.timestampUs,
                             groupSequence = null,
                             frameIndex = null,

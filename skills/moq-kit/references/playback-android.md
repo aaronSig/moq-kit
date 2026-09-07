@@ -127,3 +127,11 @@ trial, so a late callback cannot close a newer owner. An explicitly retained
 fallback keeps its demand until teardown. Coroutine cancellation before startup
 also closes the subscription. These are ownership guarantees, not wire delivery
 or physical continuity measurements.
+
+### Receive-dispatch timing
+
+Video `FrameArrived.nativeReadyNanos` optionally records the Kotlin wrapper time
+after the native read returns and before pipeline coroutine dispatch. Compare it
+with the event time to identify dispatch delay. It is not packet arrival, native
+container readiness or a cross-device clock. Application-created frames report
+no native provenance; the observation does not change frame equality or payload.
