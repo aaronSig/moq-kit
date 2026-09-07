@@ -82,7 +82,7 @@ public struct MediaTrackRequest: Sendable, Equatable {
             name: track.name,
             container: MediaContainer(track.rawConfig.container),
             targetBuffering: targetBuffering,
-            priority: (track.config.coded?.height ?? 720) <= 360 ? 60 : (track.config.coded?.height ?? 720) <= 540 ? 55 : 50
+            priority: (track.config.coded?.height ?? 720) <= 240 ? 65 : (track.config.coded?.height ?? 720) <= 360 ? 60 : (track.config.coded?.height ?? 720) <= 540 ? 55 : 50
         )
     }
 }

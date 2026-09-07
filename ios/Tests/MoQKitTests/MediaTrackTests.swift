@@ -4,6 +4,18 @@ import Moq
 import XCTest
 
 final class MediaTrackTests: XCTestCase {
+    func testFourRungLadderKeepsEveryLowerTrackAheadOfItsUpgrade() {
+        let priorities = [240, 360, 540, 720].map { height in
+            MediaTrackRequest(track: VideoTrackInfo(name: "video-\(height)", config: Moq.Video(
+                codec: "avc1", description: nil, coded: .init(width: 1280, height: UInt32(height)),
+                displayAspect: nil, bitrate: nil, framerate: nil, container: .legacy
+            )), targetBuffering: .milliseconds(700)).priority
+        }
+        XCTAssertEqual(Set(priorities).count, 4)
+        XCTAssertTrue(zip(priorities, priorities.dropFirst()).allSatisfy { $0 > $1 })
+        XCTAssertTrue(priorities.allSatisfy { $0 < 80 })
+    }
+
     func testExplicitPriorityDoesNotChangeMediaBuffering() {
         let request = MediaTrackRequest(name: "video", container: .legacy, targetBuffering: .milliseconds(700), priority: 60)
         XCTAssertEqual(request.priority, 60)
