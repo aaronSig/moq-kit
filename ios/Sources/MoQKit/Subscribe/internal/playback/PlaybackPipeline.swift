@@ -302,6 +302,11 @@ final class PlaybackPipeline {
     }
 
     var videoBufferedAhead: Duration? { videoRenderer?.bufferedAhead }
+    #if DEBUG
+    func injectVideoDecoderFailureForTesting(expectedTrackName: String, epoch: UInt64) async -> Bool {
+        await videoRenderer?.injectVideoDecoderFailureForTesting(expectedTrackName: expectedTrackName, epoch: epoch) ?? false
+    }
+    #endif
     var hasPendingVideoSwitch: Bool { videoRenderer?.hasPendingTrack ?? false }
     var warmFallbackIsReceiving: Bool { warmFallbackHandle?.isRunning == true }
     var warmFallbackBufferedAhead: Duration? {

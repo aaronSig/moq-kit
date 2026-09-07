@@ -291,6 +291,18 @@ public final class Player {
         playbackPipeline?.updateTargetLatency(latency)
     }
 
+    #if DEBUG
+    /// Drives the real display-flush/fatal-error path for a controlled test.
+    /// This does not simulate a driver-originated decoder fault. Release builds
+    /// omit the entry; the active track and epoch must still match the caller.
+    @_spi(Testing) public func injectVideoDecoderFailureForTesting(
+        expectedTrackName: String, epoch: UInt64
+    ) async -> Bool {
+        await playbackPipeline?.injectVideoDecoderFailureForTesting(
+            expectedTrackName: expectedTrackName, epoch: epoch) ?? false
+    }
+    #endif
+
     /// A snapshot of current playback quality metrics.
     ///
     /// Follows ``Player`` main-actor isolation.

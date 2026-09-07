@@ -155,3 +155,9 @@ Applications can use the public event for a bounded codec fallback; match the
 current player, active track and epoch before replacing playback. Pending-rendition
 failures, stale events and audio decode errors must not trigger a video codec change.
 The SDK does not automatically choose another codec on the application's behalf.
+
+Debug builds additionally expose `injectVideoDecoderFailureForTesting(expectedTrackName:epoch:)`
+through `@_spi(Testing) import MoQKit`. It drives the real bounded flush/fatal-event
+path only if the active track and epoch still match; it rejects repeat injection.
+Release builds omit this method. Label resulting evidence as controlled SDK
+lifecycle injection, not an observed AVFoundation driver or bitstream failure.
