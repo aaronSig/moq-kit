@@ -26,6 +26,15 @@ internal class RenditionSwitchController(
         state = SwitchState.Preparing(targetTrack)
     }
 
+    fun canPromoteUpgrade(elapsedNs: Long, bufferedAheadUs: Long, requiredAheadUs: Long): Boolean =
+        elapsedNs >= 1_500_000_000L && bufferedAheadUs >= requiredAheadUs
+
+    fun shouldAbandonUpgrade(activeAheadUs: Long, minimumActiveLeadUs: Long): Boolean =
+        minimumActiveLeadUs > 0 && activeAheadUs < minimumActiveLeadUs
+
+    fun shouldSuppressOverlap(isNewTrack: Boolean, ptsUs: Long, oldLastFedUs: Long): Boolean =
+        isNewTrack && ptsUs <= oldLastFedUs
+
     fun onKeyframeAvailable(lastFedPtsUs: Long, keyframePtsUs: Long): SwitchDecision {
         val preparing = state as? SwitchState.Preparing ?: return SwitchDecision.Wait
         val gapUs = positiveDifference(lastFedPtsUs, keyframePtsUs)
@@ -49,10 +58,22 @@ internal class RenditionSwitchController(
         is SwitchState.Preparing -> SwitchDecision.Wait
     }
 
+    /** The cancelled active track cannot advance to a future keyframe. Decode the
+     * pending track now; the existing presentation clock still schedules its output. */
+    fun onActiveExhausted(): SwitchDecision = when (val current = state) {
+        is SwitchState.CuttingIn -> SwitchDecision.CutIn(current.keyframePtsUs)
+        is SwitchState.FlushSwap -> SwitchDecision.FlushSwap
+        else -> SwitchDecision.Wait
+    }
+
     fun onTimeout(): SwitchDecision {
-        val preparing = state as? SwitchState.Preparing ?: return SwitchDecision.Wait
+        val target = when (val current = state) {
+            is SwitchState.Preparing -> current.targetTrack
+            is SwitchState.CuttingIn -> current.targetTrack
+            else -> return SwitchDecision.Wait
+        }
         state = SwitchState.Steady
-        return SwitchDecision.Abort(preparing.targetTrack)
+        return SwitchDecision.Abort(target)
     }
 
     fun shouldDiscardPendingDelta(lastFedPtsUs: Long, framePtsUs: Long): Boolean =
@@ -72,6 +93,23 @@ internal class RenditionSwitchController(
     }
 }
 
+/** Decoder output can contain the same PTS from both sides of an overlapping
+ * switch. Keep their metadata in decode submission order, rather than replacing
+ * the old frame's identity with the new rendition's identity. */
+internal class DecoderMetadataQueue<T> {
+    private val values = mutableMapOf<Long,ArrayDeque<T>>()
+    var size = 0
+        private set
+    operator fun set(pts: Long, value: T) { values.getOrPut(pts) { ArrayDeque() }.addLast(value); size++ }
+    fun remove(pts: Long): T? {
+        val queue = values[pts] ?: return null
+        val value = queue.removeFirst(); size--
+        if (queue.isEmpty()) values.remove(pts)
+        return value
+    }
+    fun clear() { values.clear(); size=0 }
+}
+
 /** Owns the active and pending resources associated with one rendition switch. */
 internal class RenditionSwitchResources<Resource : Any>(
     initialActive: Resource? = null,
@@ -87,12 +125,25 @@ internal class RenditionSwitchResources<Resource : Any>(
     var pending: Resource? = null
         private set
 
+    @Volatile
+    var retained: Resource? = null
+        private set
+
+    fun retain(resource: Resource) = synchronized(lock) {
+        check(retained == null) { "a resource is already retained" }
+        retained = resource
+    }
+
+    private fun releaseUnlessRetained(resource: Resource) {
+        if (resource !== retained) close(resource)
+    }
+
     fun replaceActive(resource: Resource) {
         val previous = synchronized(lock) {
             check(pending == null) { "cannot replace active resource during a pending switch" }
             active.also { active = resource }
         }
-        previous?.let(close)
+        previous?.let(::releaseUnlessRetained)
     }
 
     fun begin(resource: Resource) {
@@ -110,7 +161,7 @@ internal class RenditionSwitchResources<Resource : Any>(
                 pending = null
             }
         }
-        previous?.let(close)
+        previous?.let(::releaseUnlessRetained)
         return true
     }
 
@@ -119,15 +170,16 @@ internal class RenditionSwitchResources<Resource : Any>(
             if (pending !== expected) return false
             pending.also { pending = null }
         }
-        resource?.let(close)
+        resource?.let(::releaseUnlessRetained)
         return true
     }
 
     fun close() {
         val resources = synchronized(lock) {
-            listOfNotNull(pending, active).also {
+            listOfNotNull(pending, active, retained).distinct().also {
                 pending = null
                 active = null
+                retained = null
             }
         }
         resources.forEach(close)

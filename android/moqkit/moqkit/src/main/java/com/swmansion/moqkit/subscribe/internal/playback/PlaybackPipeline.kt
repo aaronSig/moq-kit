@@ -57,6 +57,7 @@ internal class PlaybackPipeline(
     private val broadcastOwner: BroadcastOwner,
     videoTrack: VideoTrackInfo?,
     audioTrack: AudioTrackInfo?,
+    private val warmFallbackInfo: VideoTrackInfo? = null,
     targetBuffering: Duration,
     initialVolume: Float,
     initialSurface: Surface?,
@@ -90,6 +91,8 @@ internal class PlaybackPipeline(
     private var videoRenderer: VideoRenderer? = null
     private var audioIngestJob: Job? = null
     private val videoIngestJobs = RenditionSwitchResources<Job>(close = Job::cancel)
+    private var warmFallbackTrack: VideoRendererTrack? = null
+    private var warmFallbackJob: Job? = null
     private var coordinatorJob: Job? = null
 
     val currentTimeUs: Long
@@ -156,6 +159,11 @@ internal class PlaybackPipeline(
         audioRenderer?.setVolume(clamped)
     }
 
+    val videoSelection: com.swmansion.moqkit.subscribe.VideoSelectionSnapshot? get() = videoRenderer?.videoSelection
+    val activeVideoTrackName: String? get() = videoSelection?.activeTrackName
+    val pendingVideoSwitch: Boolean get() = videoRenderer?.hasPendingTrack == true
+    val videoBufferedAhead: Duration? get() = videoRenderer?.bufferedAhead
+
     @Synchronized
     fun switchVideo(
         track: VideoTrackInfo,
@@ -169,17 +177,27 @@ internal class PlaybackPipeline(
         val nextEpoch = videoEpoch + 1L
         val timeline = createTimeline()
         statsTracker.emitSubscribeStart(MediaFrameKind.VIDEO, track.name, nextEpoch)
-        val newTrack = VideoRendererTrack(
+        val reusableFallback = warmFallbackTrack?.takeIf { it.trackName == track.name && warmFallbackJob?.isActive == true }
+        val newTrack = reusableFallback ?: VideoRendererTrack(
             trackName = track.name,
             trackEpoch = nextEpoch,
             config = track.rawConfig,
             targetBuffering = targetBuffering,
             timeline = timeline,
         )
-        val pendingJob = launchVideoIngestJob(track, newTrack, nextEpoch, timeline)
+        val oldInfo = selectedVideoTrack
+        val oldRendererTrack = renderer.activeIngestTrack
+        val downshift = (track.config.bitrate ?: 0u) < (oldInfo?.config?.bitrate ?: 0u)
+        val pendingJob = if (reusableFallback != null) requireNotNull(warmFallbackJob)
+            else launchVideoIngestJob(track, newTrack, nextEpoch, timeline)
+        // Cancel network demand without clearing queued presentation frames.
+        if (downshift && videoIngestJobs.active !== warmFallbackJob) videoIngestJobs.active?.cancel()
         videoIngestJobs.begin(pendingJob)
         renderer.setPendingTrack(
             track = newTrack,
+            drainingActive = downshift,
+            minimumTrialLeadUs = if (!downshift) targetBuffering.toNanos()/1000*85/100 else 0L,
+            minimumActiveLeadUs = if (!downshift) targetBuffering.toNanos()/1000*75/100 else 0L,
             onActivated = {
                 if (videoIngestJobs.activate(pendingJob)) {
                     selectedVideoTrack = track
@@ -189,7 +207,15 @@ internal class PlaybackPipeline(
                 }
             },
             onAborted = {
-                if (videoIngestJobs.abort(pendingJob)) onAborted()
+                if (videoIngestJobs.abort(pendingJob)) {
+                    if (downshift && oldInfo != null) {
+                        if (oldRendererTrack !== warmFallbackTrack) {
+                            videoIngestJobs.replaceActive(launchVideoIngestJob(oldInfo, oldRendererTrack, videoEpoch, oldRendererTrack.timeline))
+                        }
+                        restartCoordinator()
+                    }
+                    onAborted()
+                }
             },
         )
         return PlaybackPipelineSwitchOutcome.HANDLED
@@ -222,6 +248,8 @@ internal class PlaybackPipeline(
 
         audioIngestJob?.cancel()
         videoIngestJobs.close()
+        warmFallbackTrack = null
+        warmFallbackJob = null
         audioIngestJob = null
 
         audioRenderer?.stop()
@@ -299,7 +327,20 @@ internal class PlaybackPipeline(
         try {
             renderer.start()
             statsTracker.emitSubscribeStart(MediaFrameKind.VIDEO, videoInfo.name, videoEpoch)
-            videoIngestJobs.replaceActive(launchVideoIngestJob(videoInfo, track, videoEpoch, timeline))
+            val activeJob = launchVideoIngestJob(videoInfo, track, videoEpoch, timeline)
+            videoIngestJobs.replaceActive(activeJob)
+            warmFallbackInfo?.let { fallback ->
+                if (fallback.name == videoInfo.name) {
+                    warmFallbackTrack = track
+                    warmFallbackJob = activeJob
+                } else {
+                    val fallbackTimeline = createTimeline()
+                    val fallbackTrack = VideoRendererTrack(fallback.name, videoEpoch, fallback.rawConfig, targetBuffering, fallbackTimeline)
+                    warmFallbackTrack = fallbackTrack
+                    warmFallbackJob = launchVideoIngestJob(fallback, fallbackTrack, videoEpoch, fallbackTimeline)
+                }
+                videoIngestJobs.retain(requireNotNull(warmFallbackJob))
+            }
         } catch (t: Throwable) {
             renderer.stop()
             videoRenderer = null
@@ -475,7 +516,8 @@ internal class PlaybackPipeline(
                             bytes = frame.payload.size,
                         ),
                     )
-                    statsTracker.onMediaFrame(frame, MediaFrameKind.VIDEO)
+                    val standby = track === warmFallbackTrack && selectedVideoTrack?.name != track.trackName
+                    if (!standby) statsTracker.onMediaFrame(frame, MediaFrameKind.VIDEO)
                     videoPlaybackPositionUs()?.let(timeline::onPlaybackPosition)
                     when (val decision = timeline.onIngest(frame.toIngestEvent(trackEpoch, eventContext.timestampNanos))) {
                         is TimelineDecision.Admit -> submit(decision.frame.mediaFrame, eventContext)
@@ -499,6 +541,7 @@ internal class PlaybackPipeline(
                         }
                         is TimelineDecision.End -> Unit
                     }
+                    if (standby) videoPlaybackPositionUs()?.let(track::discardBeforeNewestKeyframe)
                 }
 
                 statsTracker.emitSubscribeEnd(MediaFrameKind.VIDEO, videoInfo.name, trackEpoch)
@@ -590,6 +633,8 @@ internal class PlaybackPipeline(
         coordinatorJob = null
 
         videoIngestJobs.close()
+        warmFallbackTrack = null
+        warmFallbackJob = null
 
         videoRenderer?.stop()
         videoRenderer = null

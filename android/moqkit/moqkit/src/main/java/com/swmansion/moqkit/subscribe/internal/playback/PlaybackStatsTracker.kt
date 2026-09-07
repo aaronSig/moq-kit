@@ -201,6 +201,7 @@ internal class PlaybackStatsTracker(
     }
 
     private val lock = Any()
+    private val outputTracks = mutableMapOf<MediaFrameKind, String>()
 
     private var playStartNs: Long = 0L
     private var firstAudioFrameNs: Long = 0L
@@ -254,6 +255,7 @@ internal class PlaybackStatsTracker(
         synchronized(lock) {
             this.rebufferKind = rebufferKind
             playStartNs = now
+            outputTracks.clear()
             firstAudioFrameNs = 0L
             firstVideoFrameNs = 0L
             firstAudioPlayingNs = 0L
@@ -354,10 +356,11 @@ internal class PlaybackStatsTracker(
         events.emit(PlayerEventType.PlaybackEnd(PlayerPlaybackEndEvent(reason)))
     }
 
-    fun noteStall(kind: MediaFrameKind, stalled: Boolean) {
+    fun noteStall(kind: MediaFrameKind, stalled: Boolean, outputTrackName: String? = null) {
         val now = clock()
         val rebufferChanged: Boolean
         val changed = synchronized(lock) {
+            if (outputTrackName != null && outputTracks[kind] != outputTrackName) return
             val state = stallState(kind)
             if (state.active == stalled) {
                 return
@@ -389,12 +392,20 @@ internal class PlaybackStatsTracker(
     }
 
     fun onPipelineEvent(event: PipelineEvent) {
+        val kind = event.context.mediaKind.toFrameKind()
+        val track = event.context.trackId
         when (event) {
+            is PipelineEvent.FrameRendered -> {
+                // Standby and pending tracks retain their raw pipeline diagnostics.
+                // Playback totals follow only the track actually producing output.
+                synchronized(lock) { outputTracks[kind] = track }
+                noteStall(kind, false, track)
+            }
             is PipelineEvent.StallStarted -> if (event.cause != StallCause.SWITCH_STALL) {
-                noteStall(event.context.mediaKind.toFrameKind(), true)
+                noteStall(kind, true, track)
             }
             is PipelineEvent.StallEnded -> if (event.cause != StallCause.SWITCH_STALL) {
-                noteStall(event.context.mediaKind.toFrameKind(), false)
+                noteStall(kind, false, track)
             }
             else -> Unit
         }
@@ -555,6 +566,7 @@ internal class PlaybackStatsTracker(
     fun reset() {
         synchronized(lock) {
             playStartNs = 0L
+            outputTracks.clear()
             firstAudioFrameNs = 0L
             firstVideoFrameNs = 0L
             firstAudioPlayingNs = 0L
@@ -825,6 +837,7 @@ internal class PlaybackStatsTracker(
             state.intervalMsTotal / state.intervalsWindow.size.toDouble()
         } else null
         return FrameArrivalStats(
+            lastArrivalAge = state.lastWallNs?.let { Duration.ofNanos((now-it).coerceAtLeast(0)) },
             receivedFramesPerSecond = computeFps(state.frameTimestamps, now),
             averageInterarrival = durationFromMilliseconds(averageInterarrivalMs),
             maxInterarrival = durationFromMilliseconds(state.intervalsWindow.maxOfOrNull { it.ms }),

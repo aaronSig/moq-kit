@@ -71,6 +71,8 @@ data class TimeToFirstPlaybackStats(
  * Arrival timing diagnostics for one received media stream.
  */
 data class FrameArrivalStats(
+    /** Age of the latest arrival, including a gap still in progress. */
+    val lastArrivalAge: Duration? = null,
     val receivedFramesPerSecond: Double?,
     val averageInterarrival: Duration?,
     val maxInterarrival: Duration?,

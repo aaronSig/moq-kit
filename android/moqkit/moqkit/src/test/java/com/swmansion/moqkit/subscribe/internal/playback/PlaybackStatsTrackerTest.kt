@@ -262,6 +262,8 @@ class PlaybackStatsTrackerTest {
         val tracker = PlaybackStatsTracker(clock = { now })
         val context = PipelineContext("video/main", PipelineMediaKind.VIDEO, now)
         tracker.beginSession(MediaFrameKind.VIDEO)
+        // Playback stall totals begin after output, independently of startup readiness.
+        tracker.onPipelineEvent(PipelineEvent.FrameRendered(context, 0, now))
 
         tracker.onPipelineEvent(PipelineEvent.StallStarted(context, StallCause.DECODE_STALL))
         now += 125_000_000L

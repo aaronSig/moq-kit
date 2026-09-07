@@ -96,3 +96,18 @@ Raw requests retain priority 0. Player audio uses 80 and video uses 60 at up to
 rendition during an upgrade on the lab ladder. It is a resolution-based policy,
 not a bandwidth estimator or a general ordering of same-resolution variants.
 Shared requests for an existing track keep the first subscription settings.
+
+### Rendition handoff ownership
+
+`Player` exposes pending-switch state and admitted video lead so an application
+can distinguish a request from a completed handoff. The pipeline owns active and
+pending ingest resources independently. A downshift stops obsolete input while
+queued decoder output drains; duplicate timestamps retain submission-order
+metadata and old/new overlap cannot be presented backwards.
+
+Upgrade preparation is bounded and cancels when the playing track loses its
+reserve. The optional retained fallback track remains disabled unless explicitly
+requested; enabling it adds continuous network demand. These policies are a lab
+baseline, not a guarantee of interruption-free switching or prompt recovery on
+all networks. Statistics include zero-frame windows so a frozen renderer is not
+reported as the last healthy frame rate.

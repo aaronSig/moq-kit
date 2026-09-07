@@ -55,6 +55,8 @@ internal class VideoRendererTrack(
         processor = VideoFrameProcessor(config),
     )
 
+    private var latestAdmitted: Long? = null
+    val latestAdmittedPtsUs: Long? get() = synchronized(lock) { latestAdmitted }
     private val lock = Object()
     private val buffer = FrameBuffer(PipelinePolicies.admission)
     private var mode = VideoBufferState.BUFFERING
@@ -97,6 +99,7 @@ internal class VideoRendererTrack(
             effects = buffer.offer(frame)
             val admitted = effects.any { it is AdmissionEffect.Admitted }
             if (admitted) {
+                latestAdmitted = maxOf(latestAdmitted ?: Long.MIN_VALUE, timestampUs)
                 currentGroupSequence = requireNotNull(candidate.groupSequence)
                 currentFrameIndex = requireNotNull(candidate.frameIndex)
             }
@@ -149,6 +152,10 @@ internal class VideoRendererTrack(
         discarded
     }
 
+    fun discardBeforeNewestKeyframe(cutoffUs: Long): Int = synchronized(lock) {
+        buffer.discardBeforeNewestKeyframe(cutoffUs)
+    }
+
     fun discardFront(): Boolean = synchronized(lock) { buffer.removeFront() != null }
 
     fun setOnDataAvailable(callback: (() -> Unit)?) {
@@ -165,6 +172,7 @@ internal class VideoRendererTrack(
     }
 
     fun flush(): Int = synchronized(lock) {
+        latestAdmitted = null
         mode = VideoBufferState.BUFFERING
         buffer.reset(trackEpoch)
     }
