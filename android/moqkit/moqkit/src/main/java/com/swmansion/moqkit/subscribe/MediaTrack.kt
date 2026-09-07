@@ -69,6 +69,8 @@ data class MediaTrackRequest(
     val targetBuffering: Duration = Duration.ofMillis(100),
     /** Delivery priority; larger values are scheduled ahead of smaller values. */
     val priority: UByte = 0u,
+    /** Skip previously cached groups. Requires a Session live-media factory. */
+    val startAtLiveEdge: Boolean = false,
 ) {
     internal constructor(track: AudioTrackInfo, targetBuffering: Duration) : this(
         name = track.name,

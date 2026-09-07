@@ -1,6 +1,7 @@
 package com.swmansion.moqkit.subscribe.internal
 
 import com.swmansion.moqkit.subscribe.MediaContainer
+import com.swmansion.moqkit.subscribe.LiveMediaSubscriptionFactory
 import com.swmansion.moqkit.subscribe.MediaFrame
 import com.swmansion.moqkit.subscribe.MediaTrackBufferingPolicy
 import com.swmansion.moqkit.subscribe.MediaTrackRequest
@@ -28,6 +29,7 @@ internal interface MediaSubscriptionSource {
         container: MoqContainer,
         maxLatencyMs: ULong,
         priority: UByte = 0u,
+        startAtLiveEdge: Boolean = false,
     ): MediaConsumerHandle
 }
 
@@ -38,22 +40,28 @@ internal interface MediaConsumerHandle : AutoCloseable {
 
 internal class UniFFIMediaSubscriptionSource(
     private val consumerProvider: () -> BroadcastConsumer,
+    private val liveMediaSubscriptionFactory: LiveMediaSubscriptionFactory? = null,
 ) : MediaSubscriptionSource {
     override fun subscribeMedia(
         name: String,
         container: MoqContainer,
         maxLatencyMs: ULong,
         priority: UByte,
-    ): MediaConsumerHandle =
-        UniFFIMediaConsumerHandle(
-            subscribe = {
-                consumerProvider().subscribeMedia(
-                    name = name,
-                    container = container,
-                    subscription = Subscription(priority = priority, latencyMaxMs = maxLatencyMs),
-                )
-            },
-        )
+        startAtLiveEdge: Boolean,
+    ): MediaConsumerHandle {
+        check(!startAtLiveEdge || liveMediaSubscriptionFactory != null) {
+            "Fresh live media requires a Session liveMediaSubscriptionFactory"
+        }
+        return UniFFIMediaConsumerHandle(subscribe = {
+            val consumer = consumerProvider()
+            val settings = Subscription(priority = priority, latencyMaxMs = maxLatencyMs)
+            if (startAtLiveEdge) {
+                checkNotNull(liveMediaSubscriptionFactory).subscribe(consumer, name, container, settings)
+            } else {
+                consumer.subscribeMedia(name = name, container = container, subscription = settings)
+            }
+        })
+    }
 }
 
 /**
@@ -175,10 +183,12 @@ internal sealed class MediaFrameEvent {
 private data class MediaSubscriptionKey(
     val name: String,
     val container: MediaContainer,
+    val startAtLiveEdge: Boolean,
 ) {
     constructor(request: MediaTrackRequest) : this(
         name = request.name,
         container = request.container,
+        startAtLiveEdge = request.startAtLiveEdge,
     )
 }
 
@@ -211,6 +221,7 @@ internal class MediaSubscriptionRegistry(
                 container = request.container.toRawContainer(),
                 maxLatencyMs = request.targetBuffering.toMillisecondsLongClamped().toULong(),
                 priority = request.priority,
+                startAtLiveEdge = request.startAtLiveEdge,
             )
             val subscription = SharedMediaSubscription(
                 consumer = consumer,

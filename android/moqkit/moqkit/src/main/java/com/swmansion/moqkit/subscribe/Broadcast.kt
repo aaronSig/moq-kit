@@ -279,6 +279,7 @@ class BroadcastSubscription internal constructor(
     private var originConsumer: OriginConsumer?,
     private var announced: Announced?,
     private val onClosed: () -> Unit,
+    private val liveMediaSubscriptionFactory: LiveMediaSubscriptionFactory? = null,
 ) : AutoCloseable {
     private val lock = Any()
     private var closed = false
@@ -320,7 +321,7 @@ class BroadcastSubscription internal constructor(
                     }
                 }
 
-                val owner = BroadcastOwner(path = path, consumer = consumer)
+                val owner = BroadcastOwner(path = path, consumer = consumer, liveMediaSubscriptionFactory = liveMediaSubscriptionFactory)
                 val broadcast = Broadcast(path = path, owner = owner)
                 try {
                     emit(broadcast)
@@ -393,12 +394,14 @@ class BroadcastSubscription internal constructor(
 internal class BroadcastOwner(
     private val path: String,
     consumer: BroadcastConsumer,
+    liveMediaSubscriptionFactory: LiveMediaSubscriptionFactory? = null,
 ) {
+    val supportsFreshLiveMedia = liveMediaSubscriptionFactory != null
     private val lock = Any()
     private var refCount = 1
     private var consumer: BroadcastConsumer? = consumer
     private val mediaSubscriptions = MediaSubscriptionRegistry(
-        UniFFIMediaSubscriptionSource { consumer() },
+        UniFFIMediaSubscriptionSource(consumerProvider = { consumer() }, liveMediaSubscriptionFactory = liveMediaSubscriptionFactory),
     )
 
     fun retain(): BroadcastOwner = synchronized(lock) {

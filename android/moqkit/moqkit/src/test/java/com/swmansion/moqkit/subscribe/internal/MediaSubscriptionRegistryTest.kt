@@ -2,6 +2,11 @@ package com.swmansion.moqkit.subscribe.internal
 
 import com.swmansion.moqkit.subscribe.MediaContainer
 import com.swmansion.moqkit.subscribe.MediaTrackRequest
+import com.swmansion.moqkit.subscribe.LiveMediaSubscriptionFactory
+import dev.moq.BroadcastConsumer
+import dev.moq.MediaConsumer
+import dev.moq.Subscription
+import uniffi.moq.NoHandle
 import kotlinx.coroutines.async
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.firstOrNull
@@ -139,6 +144,70 @@ class MediaSubscriptionRegistryTest {
         registry.close()
     }
 
+    @Test
+    fun factoryReceivesFreshDemandAndLegacyDemandStillUsesOrdinaryApi() = runBlocking {
+        val frame = frame(42uL)
+        val native = object : MediaConsumer(NoHandle) {
+            override suspend fun next() = frame
+        }
+        var ordinaryCalls = 0
+        val broadcast = object : BroadcastConsumer(NoHandle) {
+            override suspend fun subscribeMedia(name: String, container: MoqContainer, subscription: Subscription?): MediaConsumer {
+                ordinaryCalls++
+                return native
+            }
+        }
+        var freshCalls = 0
+        val source = UniFFIMediaSubscriptionSource(consumerProvider = { broadcast },
+            liveMediaSubscriptionFactory = LiveMediaSubscriptionFactory { owner, name, container, settings ->
+                assertSame(broadcast, owner)
+                assertEquals("video", name)
+                assertSame(MoqContainer.Legacy, container)
+                assertEquals(700uL, settings.latencyMaxMs)
+                assertEquals(60.toUByte(), settings.priority)
+                freshCalls++
+                native
+            })
+        assertSame(frame, source.subscribeMedia("video", MoqContainer.Legacy, 700uL, 60u, true).next())
+        assertEquals(1, freshCalls)
+        assertEquals(0, ordinaryCalls)
+        assertSame(frame, source.subscribeMedia("video", MoqContainer.Legacy, 700uL, 60u, false).next())
+        assertEquals(1, freshCalls)
+        assertEquals(1, ordinaryCalls)
+    }
+
+    @Test
+    fun freshAndCachedReadersNeverShareAnUpstream() {
+        val cached = FakeMediaConsumer()
+        val fresh = FakeMediaConsumer()
+        val source = FakeMediaSubscriptionSource(cached, fresh)
+        val registry = MediaSubscriptionRegistry(source)
+        val historical = registry.subscribeMedia(request())
+        val live = registry.subscribeMedia(request().copy(startAtLiveEdge = true))
+        val livePeer = registry.subscribeMedia(request().copy(startAtLiveEdge = true))
+        assertEquals(listOf(false, true), source.requests.map { it.startAtLiveEdge })
+        historical.close()
+        assertEquals(1, cached.cancelCallCount)
+        assertEquals(0, fresh.cancelCallCount)
+        live.close()
+        assertEquals(0, fresh.cancelCallCount)
+        livePeer.close()
+        assertEquals(1, fresh.cancelCallCount)
+        registry.close()
+    }
+
+    @Test
+    fun unsupportedExplicitFreshRequestFailsBeforeNativeDemand() {
+        var accessed = false
+        val source = UniFFIMediaSubscriptionSource(consumerProvider = { accessed = true; error("No native demand expected") })
+        val registry = MediaSubscriptionRegistry(source)
+        val failure = runCatching { registry.subscribeMedia(request().copy(startAtLiveEdge = true)) }.exceptionOrNull()
+        org.junit.Assert.assertTrue(failure is IllegalStateException)
+        org.junit.Assert.assertFalse(accessed)
+        assertEquals(0, registry.activeSubscriptionCount)
+        registry.close()
+    }
+
     private fun request(targetBufferingMs: Long = 100): MediaTrackRequest =
         MediaTrackRequest(
             name = "audio",
@@ -170,6 +239,7 @@ private class FakeMediaSubscriptionSource(
         val container: MoqContainer,
         val maxLatencyMs: ULong,
         val priority: UByte,
+        val startAtLiveEdge: Boolean,
     )
 
     private val consumers = ArrayDeque(consumers.toList())
@@ -180,8 +250,9 @@ private class FakeMediaSubscriptionSource(
         container: MoqContainer,
         maxLatencyMs: ULong,
         priority: UByte,
+        startAtLiveEdge: Boolean,
     ): MediaConsumerHandle {
-        requests += Request(name, container, maxLatencyMs, priority)
+        requests += Request(name, container, maxLatencyMs, priority, startAtLiveEdge)
         return consumers.removeFirst()
     }
 }
