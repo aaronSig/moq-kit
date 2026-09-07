@@ -93,3 +93,11 @@ Both `subscribeEvents` and `subscribeStats` return a `PlayerEventSubscription` t
 4. Teardown in order: cancel observation tasks → `await player.stopAll()` → cancel the broadcast subscription → `await session.close()`.
 
 Keep strong references throughout: `Session`, `BroadcastSubscription`, `Player`, and every `PlayerEventSubscription`; the `Task` handles driving `for await` loops are the lifetime of those streams.
+
+### Video-only stall recovery
+
+A video-driven clock pauses when presentation coverage runs out. Replacement
+media must be admitted while that clock is stalled, then the clock resumes at
+the new sample timestamp. Healthy video remains paced normally; video recovery
+does not re-anchor an audio-driven clock. This prevents a permanent wait after
+a live source advances during a video-only stall.

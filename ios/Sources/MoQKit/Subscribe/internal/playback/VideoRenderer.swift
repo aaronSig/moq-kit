@@ -367,7 +367,9 @@ final class VideoRenderer: @unchecked Sendable {
     }
 
     private func renderDelay(forVideoTimestampUs timestampUs: UInt64) -> RenderDelay? {
-        guard timing.isVideoDriven else { return nil }
+        // A stalled video-only clock is paused. Let replacement media reach the
+        // renderer so recordSubmittedSample can end the stall and restart it.
+        guard timing.isVideoDriven, !stallHorizon.isStalled else { return nil }
 
         let playheadUs = currentPlaybackTimeUs()
         let leadUs = renderLeadUs()
@@ -612,8 +614,12 @@ final class VideoRenderer: @unchecked Sendable {
     }
 
     private func endVideoStall() {
-        if timing.isVideoDriven {
-            timing.setRate(1.0)
+        if timing.isVideoDriven, let resumeUs = stallHorizon.latestSubmittedPTSUs {
+            // The live source advanced while this clock was paused. Resume at
+            // replacement media instead of keeping all later frames outside
+            // the render lead window behind a permanently lagging playhead.
+            lastKnownClockTimeUs = resumeUs
+            timing.setRate(1.0, timeUs: resumeUs)
         }
         if let started = videoStallStartedNanos, let cause = videoStallCause {
             let now = DispatchTime.now().uptimeNanoseconds
