@@ -27,6 +27,7 @@ internal interface MediaSubscriptionSource {
         name: String,
         container: MoqContainer,
         maxLatencyMs: ULong,
+        priority: UByte = 0u,
     ): MediaConsumerHandle
 }
 
@@ -42,13 +43,14 @@ internal class UniFFIMediaSubscriptionSource(
         name: String,
         container: MoqContainer,
         maxLatencyMs: ULong,
+        priority: UByte,
     ): MediaConsumerHandle =
         UniFFIMediaConsumerHandle(
             subscribe = {
                 consumerProvider().subscribeMedia(
                     name = name,
                     container = container,
-                    subscription = Subscription(latencyMaxMs = maxLatencyMs),
+                    subscription = Subscription(priority = priority, latencyMaxMs = maxLatencyMs),
                 )
             },
         )
@@ -208,6 +210,7 @@ internal class MediaSubscriptionRegistry(
                 name = request.name,
                 container = request.container.toRawContainer(),
                 maxLatencyMs = request.targetBuffering.toMillisecondsLongClamped().toULong(),
+                priority = request.priority,
             )
             val subscription = SharedMediaSubscription(
                 consumer = consumer,

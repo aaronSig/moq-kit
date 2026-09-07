@@ -67,17 +67,21 @@ data class MediaTrackRequest(
     val container: MediaContainer,
     /** Target live buffering depth for the upstream media subscription. */
     val targetBuffering: Duration = Duration.ofMillis(100),
+    /** Delivery priority; larger values are scheduled ahead of smaller values. */
+    val priority: UByte = 0u,
 ) {
     internal constructor(track: AudioTrackInfo, targetBuffering: Duration) : this(
         name = track.name,
         container = MediaContainer.fromRaw(track.rawConfig.container),
         targetBuffering = targetBuffering,
+        priority = 80u,
     )
 
     internal constructor(track: VideoTrackInfo, targetBuffering: Duration) : this(
         name = track.name,
         container = MediaContainer.fromRaw(track.rawConfig.container),
         targetBuffering = targetBuffering,
+        priority = (if ((track.config.coded?.height ?: 720u) <= 360u) 60 else if ((track.config.coded?.height ?: 720u) <= 540u) 55 else 50).toUByte(),
     )
 }
 

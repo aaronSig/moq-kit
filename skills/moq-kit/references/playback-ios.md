@@ -101,3 +101,12 @@ media must be admitted while that clock is stalled, then the clock resumes at
 the new sample timestamp. Healthy video remains paced normally; video recovery
 does not re-anchor an audio-driven clock. This prevents a permanent wait after
 a live source advances during a video-only stall.
+
+### Delivery priority
+
+`MediaTrackRequest` accepts an optional `priority` (0–255; larger is earlier).
+Raw requests retain priority 0. Player audio uses 80 and video uses 60 at up to
+360p, 55 at up to 540p, and 50 above that. This preserves delivery of the lower
+rendition during an upgrade on the lab ladder. It is a resolution-based policy,
+not a bandwidth estimator or a general ordering of same-resolution variants.
+Shared requests for an existing track keep the first subscription settings.
