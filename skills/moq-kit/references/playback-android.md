@@ -91,7 +91,7 @@ Everything `AutoCloseable` holds a ref-counted native broadcast handle — leaki
 ### Delivery priority
 
 `MediaTrackRequest` accepts an optional `priority` (0–255; larger is earlier).
-Raw requests retain priority 0. Player audio uses 80 and video uses 60 at up to
+Raw requests retain priority 0. Player audio uses 80 and video uses 65 at up to 240p, 60 at up to
 360p, 55 at up to 540p, and 50 above that. This preserves delivery of the lower
 rendition during an upgrade on the lab ladder. It is a resolution-based policy,
 not a bandwidth estimator or a general ordering of same-resolution variants.
