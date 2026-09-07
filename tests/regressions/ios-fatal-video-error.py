@@ -10,7 +10,7 @@ import tempfile
 
 root = Path(__file__).resolve().parents[2]
 source = (root / "ios/Sources/MoQKit/Subscribe/internal/playback/VideoRenderer.swift").read_text()
-start = source.index("    private func recoverDisplayIfNeeded()")
+start = source.index("    private func recoverDisplayIfNeeded(")
 brace = source.index("{", start)
 depth, end = 1, brace + 1
 while depth:

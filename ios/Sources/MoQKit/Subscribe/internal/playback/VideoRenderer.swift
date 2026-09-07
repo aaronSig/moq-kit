@@ -834,15 +834,35 @@ final class VideoRenderer: @unchecked Sendable {
         onTrackActivated = nil
     }
 
-    private func recoverDisplayIfNeeded() -> Bool {
+    #if DEBUG
+    func injectVideoDecoderFailureForTesting(expectedTrackName: String, epoch: UInt64) async -> Bool {
+        await withCheckedContinuation { completion in
+            enqueueQueue.async { [self] in
+                guard activeTrack.trackName == expectedTrackName,
+                      activeTrack.playbackEpoch == epoch,
+                      activeTrack.isPlaybackActive,
+                      reportedFatalVideoFailure == nil else {
+                    completion.resume(returning: false)
+                    return
+                }
+                for _ in 0...PipelinePolicies.recovery.maxRecoveries {
+                    _ = recoverDisplayIfNeeded(injectedFailure: "Controlled test: active video decoder failure")
+                }
+                completion.resume(returning: true)
+            }
+        }
+    }
+    #endif
+
+    private func recoverDisplayIfNeeded(injectedFailure: String? = nil) -> Bool {
         guard reportedFatalVideoFailure?.trackName != activeTrack.trackName
                 || reportedFatalVideoFailure?.epoch != activeTrack.playbackEpoch
         else { return false }
-        guard renderTarget.status == .failed
+        guard injectedFailure != nil || renderTarget.status == .failed
                 || renderTarget.requiresFlushToResumeDecoding
         else { return true }
 
-        let trigger = renderTarget.error?.localizedDescription
+        let trigger = injectedFailure ?? renderTarget.error?.localizedDescription
             ?? "AVFoundation requires a display flush"
         let attempt = recoveryController.onFailure(trigger: trigger)
         let context = pipelineContext(for: activeTrack)
