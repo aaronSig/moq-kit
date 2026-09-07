@@ -90,6 +90,17 @@ internal class FrameBuffer(
         return null
     }
 
+    /** Keep the newest independently decodable GOP that overlaps the old stream.
+     * Do not let an upgrade trial's initial cached GOP force a destructive flush. */
+    fun discardBeforeNewestKeyframe(cutoffUs: Long): Int {
+        val index = frames.indexOfLast { it.keyframe && it.timestampUs <= cutoffUs }
+        if (index <= 0) return 0
+        bytes -= frames.take(index).sumOf { it.sizeBytes.toLong() }
+        frames.subList(0,index).clear()
+        keyframeAccepted = true
+        return index
+    }
+
     fun peekFront(): TimedFrame? = frames.firstOrNull()
 
     fun peekAt(index: Int): TimedFrame? = frames.getOrNull(index)

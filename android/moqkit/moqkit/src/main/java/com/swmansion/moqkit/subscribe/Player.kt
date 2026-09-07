@@ -23,6 +23,11 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.launch
 import java.time.Duration
 
+/** One renderer publication: an active track and a pending target cannot tear across a swap. */
+data class VideoSelectionSnapshot(val activeTrackName: String?, val pendingTrackName: String?) {
+    val isPending: Boolean get() = pendingTrackName != null
+}
+
 private const val TAG = "Player"
 
 /**
@@ -65,6 +70,7 @@ class Player(
     targetBuffering: Duration = Duration.ofMillis(100),
     parentScope: CoroutineScope,
     volume: Float = 1f,
+    private val warmFallbackTrackName: String? = null,
 ) : AutoCloseable {
     private val scope = CoroutineScope(parentScope.coroutineContext + SupervisorJob())
     private val eventHub = PlayerEventHub()
@@ -132,6 +138,12 @@ class Player(
         get() = storedAudioVolume
 
     /** Snapshot of current playback metrics. */
+    /** Received video ahead of the presentation clock, including decoder-queued frames. */
+    val videoSelection: VideoSelectionSnapshot? get() = playbackPipeline?.videoSelection
+    val activeVideoTrackName: String? get() = videoSelection?.activeTrackName
+    val pendingVideoSwitch: Boolean get() = playbackPipeline?.pendingVideoSwitch == true
+    val videoBufferedAhead: Duration? get() = playbackPipeline?.videoBufferedAhead
+
     val stats: PlaybackStats
         get() {
             val snapshot = playbackPipeline?.snapshotStats() ?: lastStats
@@ -349,6 +361,7 @@ class Player(
             broadcastOwner = broadcastOwner,
             videoTrack = selectedVideoTrack,
             audioTrack = selectedAudioTrack,
+            warmFallbackInfo = warmFallbackTrackName?.let(::resolveVideoTrack),
             targetBuffering = targetBuffering,
             initialVolume = storedAudioVolume,
             initialSurface = surface,

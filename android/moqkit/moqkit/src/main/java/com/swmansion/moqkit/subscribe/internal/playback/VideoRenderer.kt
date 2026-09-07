@@ -13,6 +13,7 @@ import com.swmansion.moqkit.subscribe.PipelineMediaKind
 import com.swmansion.moqkit.subscribe.RetargetDecision
 import com.swmansion.moqkit.subscribe.RecoveryStep
 import com.swmansion.moqkit.subscribe.SwitchPhase
+import com.swmansion.moqkit.subscribe.VideoSelectionSnapshot
 import com.swmansion.moqkit.subscribe.MediaFrame
 import com.swmansion.moqkit.subscribe.DiscontinuityReason
 import com.swmansion.moqkit.subscribe.internal.pipeline.DecodedFrame
@@ -81,6 +82,11 @@ internal class VideoRenderer(
         val frontFrameIntervalUs: Long?,
     )
 
+    val activeIngestTrack: VideoRendererTrack get() = activeTrack
+    private var trialStartedNs = 0L
+    private var minimumTrialLeadUs = 0L
+    private var minimumActiveLeadUs = 0L
+    private var drainingActive = false
     private var pendingTrack: VideoRendererTrack? = null
     private val telemetry = RendererTelemetry(PipelineMediaKind.VIDEO, metrics, pipelineBus)
     private val switchPolicy = PipelinePolicies.switch
@@ -89,8 +95,9 @@ internal class VideoRenderer(
     private var onTrackAborted: (() -> Unit)? = null
 
     @Volatile
-    var hasPendingTrack: Boolean = false
+    var videoSelection = VideoSelectionSnapshot(activeTrack.trackName, null)
         private set
+    val hasPendingTrack: Boolean get() = videoSelection.isPending
 
     @Volatile
     private var failed = false
@@ -122,7 +129,7 @@ internal class VideoRenderer(
     )
     private val decoder: VideoDecoder?
         get() = decoderRecovery.currentSession
-    private val queuedFramesByPts = HashMap<Long, QueuedFrameMetadata>()
+    private val queuedFramesByPts = com.swmansion.moqkit.subscribe.internal.pipeline.DecoderMetadataQueue<QueuedFrameMetadata>()
     private val heldRenderCallbacks = mutableSetOf<Runnable>()
 
     /** PTS of the most recently fed frame to MediaCodec (used by swap state machine). */
@@ -147,6 +154,15 @@ internal class VideoRenderer(
 
     val bufferFill: Duration get() = activeTrack.depth
     val activeTimeline get() = activeTrack.timeline
+    private fun sourcePlaybackTimeUs(): Long? {
+        val audio = clock.nowMediaUs() ?: return null
+        return timestampMapper?.videoTimeUs(audio, PTS_CORRECTION_THRESHOLD_US) ?: audio
+    }
+    val bufferedAhead: Duration? get() {
+        val latest = activeTrack.latestAdmittedPtsUs ?: return null
+        val playhead = sourcePlaybackTimeUs() ?: return null
+        return durationFromMicroseconds((latest-playhead).coerceAtLeast(0))
+    }
 
     // MARK: - Lifecycle
 
@@ -284,7 +300,7 @@ internal class VideoRenderer(
 
         activeTrack.setOnDataAvailable(null)
         pendingTrack?.setOnDataAvailable(null)
-        hasPendingTrack = false
+        videoSelection = VideoSelectionSnapshot(null, null)
         activeTrack.flush()
         handler.post {
             awaitingKeyframeTimeout?.let { handler.removeCallbacks(it) }
@@ -384,14 +400,21 @@ internal class VideoRenderer(
         track: VideoRendererTrack,
         onActivated: (() -> Unit)?,
         onAborted: (() -> Unit)?,
+        drainingActive: Boolean = false,
+        minimumTrialLeadUs: Long = 0L,
+        minimumActiveLeadUs: Long = 0L,
     ) {
-        hasPendingTrack = true
+        videoSelection = VideoSelectionSnapshot(activeTrack.trackName, track.trackName)
         telemetry.switchProgress(track.trackName, SwitchPhase.PREPARING)
         handler.post {
             pendingTrack?.setOnDataAvailable(null)
             noDisplayBeforePts = 0L
             track.setBufferState(VideoBufferState.PENDING)
             pendingTrack = track
+            this.drainingActive = drainingActive
+            this.minimumTrialLeadUs = minimumTrialLeadUs
+            this.minimumActiveLeadUs = minimumActiveLeadUs
+            trialStartedNs = System.nanoTime()
             switchController.begin(track.trackName)
             onTrackActivated = onActivated
             onTrackAborted = onAborted
@@ -406,19 +429,42 @@ internal class VideoRenderer(
                 awaitingKeyframeTimeout = null
                 if (switchController.onTimeout() is SwitchDecision.Abort) {
                     Log.w(TAG, "Rendition switch timed out; keeping active track")
-                    track.setOnDataAvailable(null)
-                    pendingTrack = null
-                    hasPendingTrack = false
-                    onTrackActivated = null
-                    val aborted = onTrackAborted
-                    onTrackAborted = null
-                    telemetry.switchProgress(track.trackName, SwitchPhase.ABORTED)
-                    aborted?.invoke()
+                    abortPendingSwitch()
                 }
             }
             awaitingKeyframeTimeout = timeout
             handler.postDelayed(timeout, switchPolicy.keyframeTimeoutUs / 1_000L)
+            if (minimumTrialLeadUs > 0) {
+                val guard = object : Runnable {
+                    override fun run() {
+                        if (pendingTrack !== track) return
+                        runDecoderWorkSafely { tryFeedDecoder() }
+                        if (pendingTrack === track) handler.postDelayed(this, 50L)
+                    }
+                }
+                handler.postDelayed(guard, 50L)
+            }
+            // A retained fallback may already have its keyframe and overlap queued.
+            // Re-evaluate immediately instead of waiting for another network callback.
+            runDecoderWorkSafely { tryFeedDecoder() }
         }
+    }
+
+    private fun abortPendingSwitch() {
+        val track = pendingTrack ?: return
+        track.setOnDataAvailable(null)
+        track.flush()
+        pendingTrack = null
+        switchController.complete()
+        awaitingKeyframeTimeout?.let(handler::removeCallbacks)
+        awaitingKeyframeTimeout = null
+        onTrackActivated = null
+        val aborted = onTrackAborted
+        onTrackAborted = null
+        telemetry.switchProgress(track.trackName, SwitchPhase.ABORTED)
+        aborted?.invoke()
+        // Publish idle only after the pipeline has restored its previous owner.
+        videoSelection = VideoSelectionSnapshot(activeTrack.trackName, null)
     }
 
     // MARK: - Drain loop + swap state machine (HandlerThread only)
@@ -499,8 +545,19 @@ internal class VideoRenderer(
 
     private fun maybePromotePendingTrack() {
         val pending = pendingTrack ?: return
+        if (minimumTrialLeadUs > 0) {
+            val activeAhead = bufferedAhead?.toNanos()?.div(1000)
+            if (activeAhead != null && switchController.shouldAbandonUpgrade(activeAhead, minimumActiveLeadUs)) {
+                Log.i(TAG, "Abandoning upgrade before active presentation buffer runs out")
+                abortPendingSwitch()
+                return
+            }
+            val latest = pending.latestAdmittedPtsUs ?: return
+            val playhead = sourcePlaybackTimeUs() ?: return
+            if (!switchController.canPromoteUpgrade(System.nanoTime()-trialStartedNs, latest-playhead, minimumTrialLeadUs)) return
+        }
         if (switchController.state is SwitchState.Preparing) {
-            var discardedFrames = 0
+            var discardedFrames = pending.discardBeforeNewestKeyframe(lastFedPtsUs)
             while (true) {
                 val front = pending.peekFront() ?: break
                 if (front.second) break
@@ -509,8 +566,6 @@ internal class VideoRenderer(
             }
             recordRenditionSwitchDrops(pending.trackName, discardedFrames)
             pending.firstKeyframePts?.let { keyframePtsUs ->
-                awaitingKeyframeTimeout?.let(handler::removeCallbacks)
-                awaitingKeyframeTimeout = null
                 when (switchController.onKeyframeAvailable(lastFedPtsUs, keyframePtsUs)) {
                     SwitchDecision.FlushSwap -> telemetry.switchProgress(
                         pending.trackName,
@@ -531,7 +586,9 @@ internal class VideoRenderer(
             )
         }
 
-        when (switchController.onActiveProgress(lastFedPtsUs)) {
+        val decision = if (drainingActive && activeTrack.peekNextTimestampUs() == null)
+            switchController.onActiveExhausted() else switchController.onActiveProgress(lastFedPtsUs)
+        when (decision) {
             is SwitchDecision.CutIn -> {
                 noDisplayBeforePts = lastFedPtsUs
                 pending.setBufferState(VideoBufferState.PLAYING)
@@ -612,8 +669,10 @@ internal class VideoRenderer(
         isPlaybackStartEventArmed = true
         metrics?.resetVideoDecodeStats(newTrack.trackName)
         pendingCsd = AdaptiveVideoCodec.codecData(newTrack.getFormat())
+        awaitingKeyframeTimeout?.let(handler::removeCallbacks)
+        awaitingKeyframeTimeout = null
+        drainingActive = false
         pendingTrack = null
-        hasPendingTrack = false
 
         if (decoder == null && activeTrack.isProcessorReady) {
             maybeInitDecoder()
@@ -631,6 +690,9 @@ internal class VideoRenderer(
         onTrackActivated?.invoke()
         onTrackActivated = null
         onTrackAborted = null
+        // Readers see the old active+pending pair until all activation ownership
+        // changes are complete, then the new active+idle pair in one publication.
+        videoSelection = VideoSelectionSnapshot(newTrack.trackName, null)
         telemetry.switchProgress(newTrack.trackName, SwitchPhase.STEADY)
     }
 
@@ -657,7 +719,7 @@ internal class VideoRenderer(
         // After a CuttingIn swap, suppress display of frames that overlap with the
         // previous rendition. They are still decoded (needed as reference frames) but
         // not rendered, preventing duplicate-frame stutter.
-        if (timestampUs <= noDisplayBeforePts) {
+        if (switchController.shouldSuppressOverlap(diagnosticTrackName == activeTrack.trackName, timestampUs, noDisplayBeforePts)) {
             outputHandle.session.dropOutput(outputHandle.index)
             telemetry.frameDropped(
                 trackName = diagnosticTrackName,
@@ -840,7 +902,7 @@ internal class VideoRenderer(
         queuedFramesByPts.clear()
         activeTrack.setOnDataAvailable(null)
         pendingTrack?.setOnDataAvailable(null)
-        hasPendingTrack = false
+        videoSelection = VideoSelectionSnapshot(null, null)
         onError(error)
     }
 
