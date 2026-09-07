@@ -133,9 +133,9 @@ extension PlaybackPipeline {
     }
 
     static func playbackLatency(
-        liveTime: Int64?, currentTimeUs: UInt64
+        liveTime: Int64?, currentTimeUs: UInt64?
     ) -> Duration? {
-        guard let liveTime, currentTimeUs <= UInt64(Int64.max) else { return nil }
+        guard let liveTime, let currentTimeUs, currentTimeUs <= UInt64(Int64.max) else { return nil }
         let result = liveTime.subtractingReportingOverflow(Int64(currentTimeUs))
         guard !result.overflow else { return nil }
         return .microseconds(max(0, result.partialValue))
@@ -143,9 +143,9 @@ extension PlaybackPipeline {
 
     static func latencyUs(
         liveTime: Int64?,
-        currentTimeUs: UInt64
+        currentTimeUs: UInt64?
     ) -> Int64? {
-        guard let liveTime, currentTimeUs <= UInt64(Int64.max) else { return nil }
+        guard let liveTime, let currentTimeUs, currentTimeUs <= UInt64(Int64.max) else { return nil }
         let result = liveTime.subtractingReportingOverflow(Int64(currentTimeUs))
         guard !result.overflow else { return nil }
         return max(0, result.partialValue)

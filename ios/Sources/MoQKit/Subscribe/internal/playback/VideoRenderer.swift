@@ -252,12 +252,14 @@ final class VideoRenderer: @unchecked Sendable {
     var hasPendingTrack: Bool { syncOnEnqueueQueue { pendingTrack != nil } }
     var activeIngestTrack: VideoRendererTrack { syncOnEnqueueQueue { activeTrack } }
     var bufferedAhead: Duration? { syncOnEnqueueQueue {
-        guard let latest = activeTrack.latestAdmittedPtsUs else { return nil }
+        guard timing.isAnchored, let latest = activeTrack.latestAdmittedPtsUs else { return nil }
         let playhead = currentSourceVideoTimeUs()
         return .microseconds(Int64(clamping: latest > playhead ? latest-playhead : 0))
     } }
 
-    var sourcePlaybackPositionUs: UInt64 { syncOnEnqueueQueue { currentSourceVideoTimeUs() } }
+    var sourcePlaybackPositionUs: UInt64? { syncOnEnqueueQueue {
+        timing.isAnchored ? currentSourceVideoTimeUs() : nil
+    } }
 
     var activeTimeline: TrackTimeline { syncOnEnqueueQueue { activeTrack.timeline } }
 

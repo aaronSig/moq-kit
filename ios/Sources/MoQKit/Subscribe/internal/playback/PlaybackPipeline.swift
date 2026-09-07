@@ -257,7 +257,7 @@ final class PlaybackPipeline {
     func getStats() -> PlaybackStats {
         let hasAudio = audioRenderer != nil
         let hasVideo = videoRenderer != nil
-        let currentTimeUs = playbackClock.currentTimeUs
+        let currentTimeUs: UInt64? = playbackClock.isAnchored ? playbackClock.currentTimeUs : nil
         let audioLiveTime: Int64? = hasAudio ? audioTimeline?.liveEdgeUs() : nil
         let videoLiveTime: Int64? = hasVideo ? videoLiveTimeForStats(hasAudio: hasAudio) : nil
         let targetUs = Int64(clamping: targetBuffering.microsecondsUInt64Clamped)
