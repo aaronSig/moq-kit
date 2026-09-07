@@ -119,11 +119,16 @@ class MediaFrame(
     /** Whether this frame is a keyframe or sync point. */
     val keyframe: Boolean,
 ) {
+    // Stamped on the native reader's dispatcher before delivery to app code.
+    // Publicly constructed frames have no native-read provenance.
+    internal var nativeReadyNanos: Long? = null
+        private set
+
     internal constructor(raw: NativeMediaFrame) : this(
         payload = raw.payload,
         timestampUs = raw.timestampUs.toLong(),
         keyframe = raw.keyframe,
-    )
+    ) { nativeReadyNanos = System.nanoTime() }
 
     override fun equals(other: Any?): Boolean {
         if (this === other) return true

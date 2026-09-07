@@ -197,6 +197,8 @@ sealed interface PipelineEvent {
         val groupSequence: Long?,
         val frameIndex: Int?,
         val bytes: Int,
+        /** Kotlin native reader completion, before pipeline coroutine dispatch. */
+        val nativeReadyNanos: Long? = null,
     ) : PipelineEvent
 
     data class FrameAdmitted(
