@@ -17,6 +17,7 @@ internal class PipelineStallCoordinator(
 ) : AutoCloseable {
     private val lock = Any()
     private val monitors = mutableMapOf<TrackKey, StallMonitor>()
+    private val closedTracks = mutableSetOf<TrackKey>()
     private val observation = bus.observe(::onEvent)
     private val scope = scope
     private var evaluationJob: Job? = null
@@ -34,7 +35,7 @@ internal class PipelineStallCoordinator(
     fun stop() {
         evaluationJob?.cancel()
         evaluationJob = null
-        synchronized(lock) { monitors.clear() }
+        synchronized(lock) { monitors.clear(); closedTracks.clear() }
     }
 
     override fun close() {
@@ -53,14 +54,20 @@ internal class PipelineStallCoordinator(
     private fun onEvent(event: PipelineEvent) {
         if (event is PipelineEvent.StallStarted || event is PipelineEvent.StallEnded) return
         val key = event.context.trackKey
-        synchronized(lock) {
+        val completed = synchronized(lock) {
             if (event is PipelineEvent.TransportClosed) {
-                monitors.remove(key)
-                return
+                closedTracks.add(key)
+                return@synchronized monitors.remove(key)?.finish(event.context.timestampNanos) ?: emptyList()
             }
-            monitors.getOrPut(key) { StallMonitor(event.context.stableContext, policy) }
-                .onEvent(event)
+            // A renderer may drain queued output after its network subscription closes.
+            // Only actual new ingestion can reopen a retired catalog track.
+            if (event is PipelineEvent.FrameArrived) closedTracks.remove(key)
+            if (key !in closedTracks) {
+                monitors.getOrPut(key) { StallMonitor(event.context.stableContext, policy) }.onEvent(event)
+            }
+            emptyList()
         }
+        completed.forEach(bus::emit)
     }
 
     private val PipelineContext.trackKey: TrackKey

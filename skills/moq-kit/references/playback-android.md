@@ -111,3 +111,10 @@ requested; enabling it adds continuous network demand. These policies are a lab
 baseline, not a guarantee of interruption-free switching or prompt recovery on
 all networks. Statistics include zero-frame windows so a frozen renderer is not
 reported as the last healthy frame rate.
+
+### Stall lifecycle
+
+Retiring a track closes any active stall interval owned by that track. Audio
+and video stalls remain separate, and a late event from retired video cannot
+close or restart the replacement track's interval. Stopping the player retires
+its active intervals once instead of leaving stale recovery state behind.
