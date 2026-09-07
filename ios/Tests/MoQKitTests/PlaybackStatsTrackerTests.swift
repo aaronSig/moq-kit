@@ -122,6 +122,21 @@ final class PlaybackStatsTrackerSampleTests: XCTestCase {
 }
 
 final class PlaybackStatsTrackerLifecycleTests: XCTestCase {
+    func testDecodeErrorPreservesTheFailingVideoTrackEpoch() throws {
+        let hub = PlayerEventHub()
+        let tracker = PlaybackStatsTracker(events: hub)
+        let recorder = EventRecorder()
+        let subscription = hub.subscribeInternal { recorder.record($0) }
+        tracker.emitDecodeError(kind: .video, trackName: "hevc-high", message: "decoder failed", trackEpoch: 17)
+        let event = try XCTUnwrap(recorder.first(named: .decodeError))
+        guard case .decodeError(let failure) = event.type else { return XCTFail("wrong event") }
+        XCTAssertEqual(failure.track.kind, .video)
+        XCTAssertEqual(failure.track.trackName, "hevc-high")
+        XCTAssertEqual(failure.track.epoch, 17)
+        XCTAssertEqual(failure.message, "decoder failed")
+        subscription.cancel()
+    }
+
     func testTimeToFirstFrameAndPlayingAreRecordedFromSession() throws {
         let hub = PlayerEventHub()
         let tracker = PlaybackStatsTracker(events: hub)

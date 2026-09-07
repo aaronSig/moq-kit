@@ -31,6 +31,15 @@ extension PlaybackStatsTracker: AudioRendererDelegate {
 extension PlaybackStatsTracker: VideoRendererDelegate {
     func videoRenderer(
         _ renderer: VideoRenderer,
+        didFailDecodingTrack trackName: String,
+        trackEpoch: TrackEpoch,
+        message: String
+    ) {
+        emitDecodeError(kind: .video, trackName: trackName, message: message, trackEpoch: trackEpoch)
+    }
+
+    func videoRenderer(
+        _ renderer: VideoRenderer,
         didStartPlayback context: PlaybackStartContext,
         presentationTimeUs: UInt64,
         clockTimeUs: UInt64,

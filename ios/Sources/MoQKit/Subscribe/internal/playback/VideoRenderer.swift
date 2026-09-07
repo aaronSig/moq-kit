@@ -7,6 +7,13 @@ import QuartzCore
 protocol VideoRendererDelegate: AnyObject, Sendable {
     func videoRenderer(
         _ renderer: VideoRenderer,
+        didFailDecodingTrack trackName: String,
+        trackEpoch: TrackEpoch,
+        message: String
+    )
+
+    func videoRenderer(
+        _ renderer: VideoRenderer,
         didStartPlayback context: PlaybackStartContext,
         presentationTimeUs: UInt64,
         clockTimeUs: UInt64,
@@ -95,6 +102,7 @@ final class VideoRenderer: @unchecked Sendable {
 
     private var hasLoggedFirstEnqueue = false
     private var hasLoggedNoActiveFrame = false
+    private var reportedFatalVideoFailure: (trackName: String, epoch: TrackEpoch)?
 
     init(
         timing: any MediaPlaybackClock,
@@ -827,6 +835,9 @@ final class VideoRenderer: @unchecked Sendable {
     }
 
     private func recoverDisplayIfNeeded() -> Bool {
+        guard reportedFatalVideoFailure?.trackName != activeTrack.trackName
+                || reportedFatalVideoFailure?.epoch != activeTrack.playbackEpoch
+        else { return false }
         guard renderTarget.status == .failed
                 || renderTarget.requiresFlushToResumeDecoding
         else { return true }
@@ -843,10 +854,21 @@ final class VideoRenderer: @unchecked Sendable {
         ))
 
         guard attempt.step == .flush else {
-            pipelineBus.emit(.transportClosed(
-                context: context,
-                error: PipelineError(code: "video-renderer-failed", message: trigger)
-            ))
+            let owner = (trackName: activeTrack.trackName, epoch: activeTrack.playbackEpoch)
+            if reportedFatalVideoFailure?.trackName != owner.trackName
+                || reportedFatalVideoFailure?.epoch != owner.epoch {
+                reportedFatalVideoFailure = owner
+                delegate?.videoRenderer(
+                    self,
+                    didFailDecodingTrack: owner.trackName,
+                    trackEpoch: owner.epoch,
+                    message: trigger
+                )
+                pipelineBus.emit(.transportClosed(
+                    context: context,
+                    error: PipelineError(code: "video-renderer-failed", message: trigger)
+                ))
+            }
             return false
         }
 
