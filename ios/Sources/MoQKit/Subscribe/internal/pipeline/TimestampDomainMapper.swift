@@ -5,6 +5,9 @@ final class TimestampDomainMapper: @unchecked Sendable {
     private let lock = UnfairLock()
     private var audioTimeline: TrackTimeline?
     private var videoTimeline: TrackTimeline?
+    // A rendition subscription can begin with cached media. Keep the established
+    // clock-domain offset: receive backlog must not become a new media epoch.
+    private var establishedOffsetUs: Int64?
 
     init(
         audioTimeline: TrackTimeline?,
@@ -24,14 +27,21 @@ final class TimestampDomainMapper: @unchecked Sendable {
 
     func videoOffsetUs(thresholdUs: Int64) -> Int64? {
         precondition(thresholdUs >= 0)
-        let timelines = lock.withLock { (audioTimeline, videoTimeline) }
-        guard let audio = timelines.0?.liveEdgeUs(),
-              let video = timelines.1?.liveEdgeUs()
-        else { return nil }
-        let result = audio.subtractingReportingOverflow(video)
-        guard !result.overflow else { return nil }
-        let offset = result.partialValue
-        return Self.absoluteValue(offset, exceeds: thresholdUs) ? offset : nil
+        return lock.withLock {
+            guard let audioTimeline, let videoTimeline else { return nil }
+            let offset: Int64
+            if let establishedOffsetUs {
+                offset = establishedOffsetUs
+            } else {
+                guard let audio = audioTimeline.liveEdgeUs(),
+                      let video = videoTimeline.liveEdgeUs() else { return nil }
+                let result = audio.subtractingReportingOverflow(video)
+                guard !result.overflow else { return nil }
+                offset = result.partialValue
+                establishedOffsetUs = offset
+            }
+            return Self.absoluteValue(offset, exceeds: thresholdUs) ? offset : nil
+        }
     }
 
     func audioTimeUs(videoTimeUs: UInt64, thresholdUs: Int64) -> UInt64 {

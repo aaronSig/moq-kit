@@ -110,3 +110,10 @@ Raw requests retain priority 0. Player audio uses 80 and video uses 60 at up to
 rendition during an upgrade on the lab ladder. It is a resolution-based policy,
 not a bandwidth estimator or a general ordering of same-resolution variants.
 Shared requests for an existing track keep the first subscription settings.
+
+### Aligned rendition timestamps
+
+The player calibrates the audio/video timestamp offset once both timelines are
+available. Replacing a video rendition preserves that calibration: cached media
+behind the current playhead is backlog, not a new source clock. Initial sources
+with separate audio/video timestamp domains still receive their fixed offset.
